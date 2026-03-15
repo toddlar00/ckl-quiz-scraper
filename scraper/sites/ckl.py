@@ -1,0 +1,373 @@
+"""CKL (Core Knowledge for Lawyers) site scraper.
+
+Implements the BaseScraper interface for coreknowledgeforlawyers.com.
+"""
+
+import logging
+import re
+import time
+
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+)
+from selenium.webdriver.common.by import By
+
+from scraper import config
+from scraper.base import BaseScraper
+from scraper.browser import login as browser_login
+from scraper.quiz_scraper import (
+    Chapter,
+    _safe_click,
+    _safe_get,
+    _find_button,
+    get_adaptive_delay,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class CKLScraper(BaseScraper):
+    """Scraper for Core Knowledge for Lawyers quiz platform."""
+
+    SITE_NAME = "Core Knowledge for Lawyers"
+    BASE_URL = config.BASE_URL
+    REQUIRES_LOGIN = True
+
+    def login(self, username, password):
+        return browser_login(self.driver)
+
+    def navigate_to_home(self):
+        """Handle CKL's post-login redirect to tutorial page."""
+        try:
+            body_text = self.driver.find_element(By.TAG_NAME, "body").text
+            if "Getting Started" in body_text and "Page" in body_text:
+                logger.info("Detected tutorial page, clicking HOME link...")
+                home_link = self.driver.find_element(By.LINK_TEXT, "HOME")
+                home_link.click()
+                time.sleep(3)
+        except Exception:
+            pass
+
+    def discover_practice_sets(self):
+        base = config.BASE_URL.rstrip("/")
+        _safe_get(self.driver, base, "home page")
+        self.navigate_to_home()
+
+        practice_sets = []
+        try:
+            links = self.driver.find_elements(By.TAG_NAME, "a")
+            seen_urls = set()
+
+            for link in links:
+                try:
+                    href = link.get_attribute("href") or ""
+                    if not href or href == "#" or "javascript:" in href:
+                        continue
+                    if href in seen_urls or not href.startswith(base):
+                        continue
+
+                    text = link.text.strip().lower()
+                    skip_texts = [
+                        "join a class", "get more practice sets", "home",
+                        "help", "my account", "log out", "support",
+                        "forgot", "create", "carolina academic",
+                        "faculty", "archived", "expired",
+                        "welcome to ckl", "getting started",
+                        "show", "search",
+                    ]
+                    if any(s in text for s in skip_texts):
+                        continue
+                    if not text and not link.find_elements(By.TAG_NAME, "img"):
+                        continue
+
+                    title = link.text.strip()
+                    if not title:
+                        try:
+                            imgs = link.find_elements(By.TAG_NAME, "img")
+                            for img in imgs:
+                                alt = (img.get_attribute("alt") or "").strip()
+                                if alt:
+                                    title = alt
+                                    break
+                        except Exception:
+                            pass
+                    if not title:
+                        try:
+                            parent = link.find_element(By.XPATH, "./..")
+                            title = parent.text.strip()
+                        except Exception:
+                            title = href
+
+                    if title and href != base + "/" and href != base:
+                        title_lower = title.lower()
+                        if any(s in title_lower for s in skip_texts):
+                            continue
+                        seen_urls.add(href)
+                        practice_sets.append((title, href))
+
+                except StaleElementReferenceException:
+                    continue
+
+        except Exception as e:
+            logger.error("Error discovering practice sets: %s", e)
+            from scraper.browser import diagnose_page
+            diagnose_page(self.driver, "discover_practice_sets")
+
+        # Deduplicate
+        unique = []
+        seen = set()
+        for title, url in practice_sets:
+            if url not in seen:
+                seen.add(url)
+                unique.append((title, url))
+
+        if unique:
+            logger.info("Discovered %d practice set(s):", len(unique))
+            for i, (title, url) in enumerate(unique, 1):
+                logger.info("  %d. %s", i, title)
+        else:
+            logger.warning("No practice sets found. Current URL: %s", self.driver.current_url)
+            from scraper.browser import diagnose_page
+            diagnose_page(self.driver, "no_practice_sets")
+
+        return unique
+
+    def discover_chapters(self, practice_set_url):
+        _safe_get(self.driver, practice_set_url, "practice set")
+        chapters = []
+
+        try:
+            launch_links = self.driver.find_elements(By.PARTIAL_LINK_TEXT, "Launch")
+            if not launch_links:
+                logger.warning("No 'Launch' links found. URL: %s", self.driver.current_url)
+                from scraper.browser import diagnose_page
+                diagnose_page(self.driver, "no_launch_links")
+                return chapters
+
+            for launch_link in launch_links:
+                try:
+                    href = launch_link.get_attribute("href") or ""
+                    if not href:
+                        continue
+                    row = launch_link.find_element(By.XPATH, "./ancestor::tr")
+                    cells = row.find_elements(By.TAG_NAME, "td")
+
+                    chapter_name = ""
+                    status = ""
+                    for cell in cells:
+                        cell_text = cell.text.strip()
+                        if cell_text.startswith("Chapter") or ":" in cell_text:
+                            if len(cell_text) > 5 and cell_text != "Launch":
+                                chapter_name = cell_text
+                        if cell_text in ("To Do", "In Progress", "Complete", "Completed"):
+                            status = cell_text
+                    if not chapter_name:
+                        chapter_name = row.text.strip().replace("Launch", "").strip()
+
+                    chapters.append(Chapter(
+                        chapter_name=chapter_name, launch_url=href, status=status,
+                    ))
+                except (StaleElementReferenceException, NoSuchElementException):
+                    continue
+
+        except Exception as e:
+            logger.error("Error discovering chapters: %s", e)
+
+        logger.info("Found %d chapter(s):", len(chapters))
+        for ch in chapters:
+            logger.info("  - %s [%s]", ch.chapter_name, ch.status)
+        return chapters
+
+    def get_total_questions(self, body_text):
+        match = re.search(r'Question\s+\d+\s+of\s+(\d+)', body_text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'(\d+)\s+of\s+(\d+)', body_text)
+        if match:
+            return int(match.group(2))
+        return None
+
+    def extract_question(self, body_text):
+        question_type = self._detect_type(body_text)
+        question_text = self._extract_text(body_text)
+        return question_type, question_text
+
+    def extract_choices(self, body_text):
+        """Extract choices from radio buttons (DOM), fallback to text regex."""
+        choices = []
+        try:
+            radio_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            for radio in radio_inputs:
+                try:
+                    radio_id = radio.get_attribute("id")
+                    label = None
+                    if radio_id:
+                        labels = self.driver.find_elements(
+                            By.CSS_SELECTOR, f"label[for='{radio_id}']"
+                        )
+                        if labels:
+                            label = labels[0]
+                    if not label:
+                        try:
+                            label = radio.find_element(By.XPATH, "./ancestor::label")
+                        except NoSuchElementException:
+                            try:
+                                label = radio.find_element(By.XPATH, "./following-sibling::label")
+                            except NoSuchElementException:
+                                pass
+                    label_text = (label.text.strip() if label
+                                  else radio.find_element(By.XPATH, "./..").text.strip())
+                    if not label_text:
+                        continue
+                    match = re.match(r'^([A-D])\.\s*(.*)', label_text, re.DOTALL)
+                    if match:
+                        letter, text = match.group(1), match.group(2).strip()
+                    else:
+                        letter, text = chr(65 + len(choices)), label_text
+                    choices.append({"label": letter, "text": text, "is_correct": False})
+                except (StaleElementReferenceException, NoSuchElementException):
+                    continue
+        except Exception as e:
+            logger.debug("Error extracting choices from radio buttons: %s", e)
+
+        if not choices:
+            choices = self._extract_choices_from_text(body_text)
+        if not choices:
+            logger.warning("  No answer choices found on page")
+        return choices
+
+    def submit_answer(self):
+        try:
+            radios = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            for radio in radios:
+                if radio.is_displayed() and radio.is_enabled():
+                    _safe_click(self.driver, radio, "radio button")
+                    break
+            get_adaptive_delay().sleep("pre_submit")
+            submit_btn = _find_button(self.driver, ["submit"])
+            if submit_btn:
+                _safe_click(self.driver, submit_btn, "Submit button")
+                get_adaptive_delay().sleep("post_submit")
+            else:
+                logger.warning("  Could not find Submit button")
+                from scraper.browser import diagnose_page
+                diagnose_page(self.driver, "no_submit_button")
+        except Exception as e:
+            logger.warning("  Error submitting answer: %s", e)
+
+    def extract_feedback(self, body_text):
+        correct_answer = ""
+        explanation = ""
+
+        match = re.search(r'The correct answer is\s+([A-D])', body_text, re.IGNORECASE)
+        if match:
+            correct_answer = match.group(1).upper()
+        if not correct_answer:
+            if re.search(r'\bCorrect[!.]', body_text) and "incorrect" not in body_text.lower():
+                correct_answer = "A"
+
+        heres_why = re.search(
+            r"Here'?s\s+Why:?\s*(.+?)(?=Check this box|You will be able|I'm still confused|Next Question|Back to Practice|$)",
+            body_text, re.DOTALL | re.IGNORECASE,
+        )
+        if heres_why:
+            explanation = heres_why.group(1).strip()
+            explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
+
+        if not correct_answer:
+            logger.warning("  Could not determine correct answer from feedback")
+        return correct_answer, explanation
+
+    def click_next_question(self):
+        try:
+            try:
+                next_link = self.driver.find_element(By.PARTIAL_LINK_TEXT, "Next Question")
+                if next_link.is_displayed():
+                    _safe_click(self.driver, next_link, "Next Question")
+                    get_adaptive_delay().sleep("next_click")
+                    return True
+            except NoSuchElementException:
+                pass
+            try:
+                next_el = self.driver.find_element(
+                    By.XPATH, "//*[contains(text(), 'Next Question')]"
+                )
+                if next_el.is_displayed():
+                    _safe_click(self.driver, next_el, "Next Question")
+                    get_adaptive_delay().sleep("next_click")
+                    return True
+            except NoSuchElementException:
+                pass
+            for el in self.driver.find_elements(By.CSS_SELECTOR, "a, button"):
+                try:
+                    text = (el.text or el.get_attribute("value") or "").strip()
+                    if "next question" in text.lower() and el.is_displayed():
+                        _safe_click(self.driver, el, "Next Question")
+                        get_adaptive_delay().sleep("next_click")
+                        return True
+                except StaleElementReferenceException:
+                    continue
+        except Exception as e:
+            logger.debug("Error clicking Next Question: %s", e)
+        return False
+
+    # ------------------------------------------------------------------
+    # CKL-specific helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_type(body_text):
+        if "Multiple Choice" in body_text:
+            return "Multiple Choice"
+        if "True/False" in body_text or "True or False" in body_text:
+            return "True/False"
+        if "Fill in" in body_text:
+            return "Fill in the Blank"
+        if "Select all" in body_text or "select all" in body_text:
+            return "Select All That Apply"
+        return ""
+
+    @staticmethod
+    def _extract_text(body_text):
+        try:
+            text = body_text
+            marker = ">>>> Question <<<<"
+            if marker in text:
+                text = text.split(marker, 1)[1].strip()
+            lines = text.split("\n")
+            question_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if re.match(r'^[○●]?\s*[A-D]\.\s', stripped):
+                    break
+                if not question_lines and not stripped:
+                    continue
+                if stripped in ("Multiple Choice", "True/False",
+                                "Fill in the Blank", "Select All That Apply"):
+                    continue
+                question_lines.append(stripped)
+            result = " ".join(question_lines).strip()
+            return re.sub(r'\s+', ' ', result)
+        except Exception as e:
+            logger.debug("Error extracting question text: %s", e)
+            return ""
+
+    @staticmethod
+    def _extract_choices_from_text(body_text):
+        choices = []
+        try:
+            pattern = re.compile(
+                r'([A-D])\.\s+(.+?)(?=\n\s*[A-D]\.\s|\nSubmit|\Z)', re.DOTALL
+            )
+            for label, text in pattern.findall(body_text):
+                text = text.strip()
+                if text and len(text) > 1:
+                    choices.append({
+                        "label": label,
+                        "text": re.sub(r'\s+', ' ', text),
+                        "is_correct": False,
+                    })
+        except Exception:
+            pass
+        return choices

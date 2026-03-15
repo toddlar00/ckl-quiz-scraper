@@ -248,12 +248,15 @@ def _safe_get(driver, url, description="page"):
     """Navigate to a URL with retry logic for transient network errors."""
     def _do_get():
         driver.get(url)
-        # Wait for body to be present
+        # Wait for body to be present and page to finish loading
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
+        # Wait for document.readyState == "complete" instead of hardcoded sleep
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
     _retry(_do_get, retries=3, delay=2, description=f"Loading {description}")
-    time.sleep(2)
 
 
 def _safe_click(driver, element, description="element"):
@@ -610,27 +613,40 @@ def _get_total_questions(driver):
     return None
 
 
+def _get_body_text(driver):
+    """Read body text once for caching. Returns empty string on failure."""
+    try:
+        return driver.find_element(By.TAG_NAME, "body").text
+    except Exception as e:
+        logger.debug("Error reading body text: %s", e)
+        return ""
+
+
 def _scrape_single_question(driver, question_num, total):
     """Scrape one question: read it, submit an answer, read the feedback."""
     source_url = driver.current_url
 
+    # Read body text ONCE for pre-submit extraction (eliminates 3 redundant reads)
+    pre_body = _get_body_text(driver)
+
     # Detect question type
-    question_type = _detect_question_type(driver)
+    question_type = _detect_question_type(pre_body)
 
     # Extract question text
-    question_text = _extract_question_text(driver)
+    question_text = _extract_question_text(pre_body)
     if not question_text:
         return None
 
-    # Extract answer choices
-    choices = _extract_choices(driver)
+    # Extract answer choices (DOM-based first, then text fallback using cached body)
+    choices = _extract_choices(driver, pre_body)
 
     # Submit answer to reveal correct answer + explanation
     _submit_answer(driver)
     get_adaptive_delay().sleep("feedback_wait")
 
-    # Read feedback
-    correct_answer, explanation = _extract_feedback(driver)
+    # Read body text ONCE for post-submit feedback extraction
+    post_body = _get_body_text(driver)
+    correct_answer, explanation = _extract_feedback(post_body)
 
     # Mark the correct choice
     for choice in choices:
@@ -649,34 +665,29 @@ def _scrape_single_question(driver, question_num, total):
     )
 
 
-def _detect_question_type(driver):
-    """Detect the question type from page text."""
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        if "Multiple Choice" in body_text:
-            return "Multiple Choice"
-        if "True/False" in body_text or "True or False" in body_text:
-            return "True/False"
-        if "Fill in" in body_text:
-            return "Fill in the Blank"
-        if "Select all" in body_text or "select all" in body_text:
-            return "Select All That Apply"
-    except Exception:
-        pass
+def _detect_question_type(body_text):
+    """Detect the question type from cached page text."""
+    if "Multiple Choice" in body_text:
+        return "Multiple Choice"
+    if "True/False" in body_text or "True or False" in body_text:
+        return "True/False"
+    if "Fill in" in body_text:
+        return "Fill in the Blank"
+    if "Select all" in body_text or "select all" in body_text:
+        return "Select All That Apply"
     return ""
 
 
-def _extract_question_text(driver):
-    """Extract the question text between the header and answer choices."""
+def _extract_question_text(body_text):
+    """Extract the question text between the header and answer choices from cached text."""
     try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-
+        text = body_text
         # Remove everything before the question marker
         marker = ">>>> Question <<<<"
-        if marker in body_text:
-            body_text = body_text.split(marker, 1)[1].strip()
+        if marker in text:
+            text = text.split(marker, 1)[1].strip()
 
-        lines = body_text.split("\n")
+        lines = text.split("\n")
         question_lines = []
         for line in lines:
             stripped = line.strip()
@@ -700,7 +711,7 @@ def _extract_question_text(driver):
         return ""
 
 
-def _extract_choices(driver):
+def _extract_choices(driver, body_text=""):
     """Extract answer choices (A, B, C, D) from radio buttons."""
     choices = []
 
@@ -754,9 +765,9 @@ def _extract_choices(driver):
     except Exception as e:
         logger.debug("Error extracting choices from radio buttons: %s", e)
 
-    # Fallback: parse from page text
+    # Fallback: parse from cached page text (no extra DOM read)
     if not choices:
-        choices = _extract_choices_from_text(driver)
+        choices = _extract_choices_from_text(body_text)
 
     if not choices:
         logger.warning("  No answer choices found on page")
@@ -764,11 +775,10 @@ def _extract_choices(driver):
     return choices
 
 
-def _extract_choices_from_text(driver):
-    """Fallback: extract choices from page text using regex."""
+def _extract_choices_from_text(body_text):
+    """Fallback: extract choices from cached page text using regex."""
     choices = []
     try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
         pattern = re.compile(
             r'([A-D])\.\s+(.+?)(?=\n\s*[A-D]\.\s|\nSubmit|\Z)', re.DOTALL
         )
@@ -835,14 +845,12 @@ def _find_button(driver, text_matches):
     return None
 
 
-def _extract_feedback(driver):
-    """Extract the correct answer and explanation from post-submit feedback."""
+def _extract_feedback(body_text):
+    """Extract the correct answer and explanation from cached post-submit text."""
     correct_answer = ""
     explanation = ""
 
     try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-
         # "The correct answer is C."
         match = re.search(
             r'The correct answer is\s+([A-D])',

@@ -24,6 +24,7 @@ from scraper.quiz_scraper import (
     reset_adaptive_delay,
     scrape_chapter_questions,
 )
+from scraper.sites import DEFAULT_SITE, SITE_SCRAPERS
 
 
 def setup_logging(verbose=False, log_file=None):
@@ -73,7 +74,17 @@ examples:
   %(prog)s --no-headless -v                      # debug mode (visible browser)
   %(prog)s --dry-run                             # preview what would be scraped
   %(prog)s --log-file scrape.log                 # save log output to file
+  %(prog)s --site ckl                            # select quiz site (default: ckl)
 """,
+    )
+
+    # Site selection
+    site_names = list(SITE_SCRAPERS.keys())
+    parser.add_argument(
+        "--site",
+        choices=site_names,
+        default=DEFAULT_SITE,
+        help=f"Quiz site to scrape (default: {DEFAULT_SITE}). Available: {', '.join(site_names)}",
     )
 
     # Scraping scope
@@ -173,13 +184,15 @@ examples:
     driver = None
     start_time = time.time()
     try:
-        logger.info("Starting CKL Quiz Scraper...")
+        scraper_cls = SITE_SCRAPERS[args.site]
+        logger.info("Starting %s scraper...", scraper_cls.SITE_NAME)
         driver = create_driver()
+        site = scraper_cls(driver)
 
         # Login
         if not args.skip_login:
             logger.info("Logging in...")
-            success = login(driver)
+            success = site.login(cfg.USERNAME, cfg.PASSWORD)
             if not success:
                 logger.error(
                     "Login failed. Troubleshooting steps:\n"
@@ -204,7 +217,7 @@ examples:
                 launch_url=args.chapter_url,
             )
             logger.info("Scraping chapter: %s", args.chapter_url)
-            scrape_chapter_questions(driver, chapter, resume=not args.fresh)
+            site.scrape_chapter(chapter, resume=not args.fresh)
 
             ps = PracticeSet(
                 title="Direct Scrape",
@@ -216,7 +229,7 @@ examples:
         else:
             # Discover practice sets
             logger.info("Discovering practice sets...")
-            ps_links = discover_practice_sets(driver)
+            ps_links = site.discover_practice_sets()
 
             if not ps_links:
                 logger.error(
@@ -250,7 +263,7 @@ examples:
                 logger.info("Practice Set: %s", ps_title)
                 logger.info("=" * 60)
 
-                chapters = discover_chapters(driver, ps_url)
+                chapters = site.discover_chapters(ps_url)
                 if not chapters:
                     logger.warning("  No chapters found, skipping")
                     continue
@@ -284,7 +297,7 @@ examples:
                             "----- Chapter %d/%d: %s -----",
                             i, len(chapters), chapter.chapter_name,
                         )
-                        scrape_chapter_questions(driver, chapter, resume=not args.fresh)
+                        site.scrape_chapter(chapter, resume=not args.fresh)
                         logger.info(
                             "  Result: %d question(s) scraped",
                             len(chapter.questions),

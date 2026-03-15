@@ -71,7 +71,8 @@ python main.py --log-file scrape.log
 | `--no-headless` | Show the browser window |
 | `--skip-login` | Skip login (use saved cookies) |
 | `--fresh` | Ignore saved progress, re-scrape everything |
-| `--delay SECONDS` | Delay between questions (default: 1.0) |
+| `--site NAME` | Quiz site to scrape (default: `ckl`) |
+| `--delay SECONDS` | Fixed delay between questions (disables adaptive) |
 | `--verbose, -v` | Debug-level logging |
 | `--dry-run` | Discover structure without scraping questions |
 | `--log-file PATH` | Also write log output to a file |
@@ -143,8 +144,8 @@ When something goes wrong (login failure, missing elements, parse errors), the s
 
 These files help diagnose issues without needing `--no-headless`.
 
-### Rate Limiting
-A configurable delay (default 1 second) is applied between questions to avoid overloading the server. Adjust with `--delay` or `CKL_REQUEST_DELAY`.
+### Adaptive Rate Limiting
+The scraper uses an adaptive delay system that automatically finds the fastest safe scraping speed. It starts with a 9-second budget spread across 5 sleep points per question cycle. On each successful scrape, the budget decreases by 1 second; on failure, it increases by 1 second. The budget is clamped between 0.5 and 30 seconds and persists across runs in `.ckl_adaptive_delay.json`. Use `--delay` to override with a fixed delay, or `--fresh` to reset the adaptive state.
 
 ## Testing
 
@@ -154,7 +155,7 @@ Run the test suite with pytest:
 pytest tests/ -v
 ```
 
-Tests cover all 8 export formats including output validation, edge cases, special character escaping, and the export dispatcher.
+Tests cover all 8 export formats, adaptive delay behavior, and the site plugin system (70 tests total).
 
 ## Project Structure
 
@@ -164,7 +165,12 @@ ckl-quiz-scraper/
 ├── scraper/
 │   ├── config.py                    # Environment / settings
 │   ├── browser.py                   # WebDriver, login, diagnostics, cookies
-│   ├── quiz_scraper.py              # Discovery, scraping, progress tracking
+│   ├── quiz_scraper.py              # Adaptive delay, progress tracking, helpers
+│   ├── base.py                      # BaseScraper ABC (plugin interface)
+│   ├── sites/
+│   │   ├── __init__.py              # Site plugin registry
+│   │   ├── ckl.py                   # CKL site implementation
+│   │   └── example_site.py          # Template for adding new sites
 │   └── exporters/
 │       ├── __init__.py              # Export dispatcher
 │       ├── json_export.py           # JSON
@@ -177,13 +183,30 @@ ckl-quiz-scraper/
 │       └── canvas_qti.py            # Canvas QTI 1.2
 ├── tests/
 │   ├── conftest.py                  # Shared test fixtures
-│   └── test_exporters.py           # Exporter unit tests (42 tests)
+│   ├── test_exporters.py            # Exporter tests (42 tests)
+│   ├── test_adaptive_delay.py       # Adaptive delay tests (15 tests)
+│   └── test_sites.py                # Site plugin tests (13 tests)
 ├── output/                          # Exported files (gitignored)
 ├── debug_screenshots/               # Error diagnostics (gitignored)
 ├── requirements.txt
 ├── .env.example
 └── .gitignore
 ```
+
+## Adding a New Quiz Site
+
+The scraper uses a plugin architecture. To add support for a new quiz website:
+
+1. Copy `scraper/sites/example_site.py` to a new file (e.g., `my_site.py`)
+2. Implement all abstract methods from `BaseScraper` for the target site's HTML structure
+3. Register in `scraper/sites/__init__.py`:
+   ```python
+   from scraper.sites.my_site import MySiteScraper
+   SITE_SCRAPERS["my_site"] = MySiteScraper
+   ```
+4. Run: `python main.py --site my_site`
+
+The framework handles browser management, adaptive delays, progress tracking, resume support, and export to all 8 formats. Your plugin only needs to implement site-specific DOM interaction.
 
 ## Troubleshooting
 
