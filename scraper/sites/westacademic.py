@@ -131,22 +131,28 @@ class WestAcademicScraper(BaseScraper):
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='password']"))
             )
 
+            from scraper.human_behavior import human_type, human_click, random_think_pause, random_micro_delay
+
             email_field.clear()
-            email_field.send_keys(username)
-            time.sleep(0.3)
+            random_micro_delay()
+            human_type(email_field, username)
+            random_think_pause()
+
             password_field.clear()
-            password_field.send_keys(password)
-            time.sleep(0.3)
+            random_micro_delay()
+            human_type(password_field, password)
+            random_think_pause()
 
             # Find and click submit
             submit_btn = self._find_submit_button()
             if submit_btn:
-                submit_btn.click()
+                human_click(self.driver, submit_btn, "Sign In button")
             else:
                 form = password_field.find_element(By.XPATH, "./ancestor::form")
                 form.submit()
 
-            time.sleep(4)
+            import random
+            time.sleep(3 + random.uniform(0.5, 2.0))
 
             # Check for errors
             body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import random
 import time
 from pathlib import Path
 
@@ -23,21 +24,46 @@ SCREENSHOT_DIR = "debug_screenshots"
 
 
 def create_driver():
-    """Create and configure a Chrome WebDriver instance."""
+    """Create and configure a Chrome WebDriver instance with anti-detection measures."""
+    import random
+
     options = Options()
     if config.HEADLESS:
         options.add_argument("--headless=new")
+
+    # --- Core flags ---
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    # Reduce detection of automated browsing
+
+    # Realistic viewport (randomized from common resolutions to avoid fingerprinting)
+    viewports = ["1920,1080", "1536,864", "1440,900", "1366,768", "1280,720"]
+    options.add_argument(f"--window-size={random.choice(viewports)}")
+
+    # --- Anti-detection: user agent ---
+    # Rotate among recent Chrome versions on Windows/Mac
+    ua_templates = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36",
+    ]
+    chrome_ver = random.choice(["120", "121", "122", "123", "124", "125"])
+    user_agent = random.choice(ua_templates).format(ver=chrome_ver)
+    options.add_argument(f"--user-agent={user_agent}")
+
+    # --- Anti-detection: automation flags ---
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--disable-blink-features=AutomationControlled")
+
+    # --- Anti-detection: additional stealth flags ---
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-notifications")
+    # Prevent WebRTC IP leaking (can reveal headless)
+    options.add_argument("--disable-webrtc")
+    # Accept language header for consistency
+    options.add_argument("--lang=en-US")
 
     try:
         service = Service(ChromeDriverManager().install())
@@ -56,6 +82,11 @@ def create_driver():
 
     driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
     driver.implicitly_wait(config.IMPLICIT_WAIT)
+
+    # Inject stealth JavaScript via CDP (runs before any page JS)
+    from scraper.human_behavior import setup_stealth_on_load
+    setup_stealth_on_load(driver)
+
     return driver
 
 
@@ -229,7 +260,9 @@ def _has_login_form(driver):
 
 
 def _submit_login(driver):
-    """Fill and submit the CKL login form."""
+    """Fill and submit the CKL login form with human-like behavior."""
+    from scraper.human_behavior import human_type, human_click, random_think_pause, random_micro_delay
+
     wait = WebDriverWait(driver, 15)
 
     try:
@@ -260,26 +293,29 @@ def _submit_login(driver):
             diagnose_page(driver, "login_no_email_field")
             return False
 
-        # Fill in credentials
+        # Fill in credentials with human-like typing
         email_field.clear()
-        email_field.send_keys(config.USERNAME)
-        time.sleep(0.3)
-        password_field.clear()
-        password_field.send_keys(config.PASSWORD)
-        time.sleep(0.3)
+        random_micro_delay()
+        human_type(email_field, config.USERNAME)
+        random_think_pause()
 
-        # Find and click the "Log In" button
+        password_field.clear()
+        random_micro_delay()
+        human_type(password_field, config.PASSWORD)
+        random_think_pause()
+
+        # Find and click the "Log In" button with human-like behavior
         submit_btn = _find_login_button(driver)
 
         if submit_btn:
-            submit_btn.click()
+            human_click(driver, submit_btn, "Log In button")
         else:
             # Fallback: submit the form directly
             form = password_field.find_element(By.XPATH, "./ancestor::form")
             form.submit()
 
-        # Wait for page to change
-        time.sleep(4)
+        # Wait for page to change (with jitter)
+        time.sleep(3 + random.uniform(0.5, 2.0))
 
         # Verify login success
         page_text = driver.find_element(By.TAG_NAME, "body").text.lower()

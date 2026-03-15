@@ -176,6 +176,12 @@ class BaseScraper(ABC):
             question_num += 1
             adaptive = get_adaptive_delay()
 
+            # Occasional random scroll to simulate reading (every ~5 questions)
+            import random
+            if random.random() < 0.2:
+                from scraper.human_behavior import random_scroll
+                random_scroll(self.driver)
+
             try:
                 q = self._scrape_single_question(question_num, total or 0)
                 if q:

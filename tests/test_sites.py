@@ -206,3 +206,37 @@ class TestGoogleAuth:
         from scraper.google_auth import GOOGLE_BUTTON_TEXTS
         for text in GOOGLE_BUTTON_TEXTS:
             assert text == text.lower()
+
+
+class TestHumanBehavior:
+    """Test human behavior simulation (no driver needed)."""
+
+    def test_human_delay_positive(self):
+        from scraper.human_behavior import human_delay
+        import time
+        start = time.time()
+        human_delay(0.1, jitter_ratio=0.1)
+        elapsed = time.time() - start
+        assert elapsed >= 0.05  # At least some delay
+
+    def test_random_micro_delay(self):
+        from scraper.human_behavior import random_micro_delay
+        import time
+        start = time.time()
+        random_micro_delay()
+        elapsed = time.time() - start
+        assert 0.04 <= elapsed <= 0.5
+
+    def test_stealth_js_contains_webdriver_override(self):
+        from scraper.human_behavior import STEALTH_JS
+        assert "navigator" in STEALTH_JS
+        assert "webdriver" in STEALTH_JS
+        assert "plugins" in STEALTH_JS
+
+    def test_stealth_js_contains_chrome_runtime(self):
+        from scraper.human_behavior import STEALTH_JS
+        assert "chrome.runtime" in STEALTH_JS
+
+    def test_stealth_js_contains_webgl_override(self):
+        from scraper.human_behavior import STEALTH_JS
+        assert "WebGLRenderingContext" in STEALTH_JS

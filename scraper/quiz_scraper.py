@@ -94,10 +94,18 @@ class AdaptiveDelay:
         return max(0.0, self._budget * fraction)
 
     def sleep(self, sleep_point):
-        """Sleep for the adaptive duration of the named sleep point."""
+        """Sleep for the adaptive duration with human-like jitter.
+
+        Adds gaussian jitter (±30%) around the computed duration so timing
+        patterns don't look robotic to anti-bot systems.
+        """
+        import random
         duration = self.get(sleep_point)
         if duration > 0:
-            time.sleep(duration)
+            # Add jitter: ±30% gaussian noise, clamped to at least 50ms
+            jitter = random.gauss(0, duration * 0.15)
+            actual = max(0.05, duration + jitter)
+            time.sleep(actual)
 
     def on_success(self):
         """Called after a question is successfully scraped."""
@@ -251,7 +259,7 @@ def _retry(func, retries=3, delay=2, description="action"):
 
 
 def _safe_get(driver, url, description="page"):
-    """Navigate to a URL with retry logic for transient network errors."""
+    """Navigate to a URL with retry logic and stealth re-injection."""
     def _do_get():
         driver.get(url)
         # Wait for body to be present and page to finish loading
@@ -262,19 +270,20 @@ def _safe_get(driver, url, description="page"):
         WebDriverWait(driver, 10).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
+        # Re-inject stealth JS after navigation (page context resets)
+        from scraper.human_behavior import inject_stealth
+        inject_stealth(driver)
     _retry(_do_get, retries=3, delay=2, description=f"Loading {description}")
 
 
 def _safe_click(driver, element, description="element"):
-    """Click an element with fallback to JS click."""
+    """Click an element with human-like behavior and fallback to JS click."""
+    from scraper.human_behavior import human_click
     try:
-        element.click()
-    except WebDriverException:
-        try:
-            driver.execute_script("arguments[0].click();", element)
-        except Exception as e:
-            logger.warning("Could not click %s: %s", description, e)
-            raise
+        human_click(driver, element, description)
+    except Exception as e:
+        logger.warning("Could not click %s: %s", description, e)
+        raise
 
 
 # ---------------------------------------------------------------------------
