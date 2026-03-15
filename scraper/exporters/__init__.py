@@ -1,6 +1,7 @@
 """Quiz data exporters for various formats."""
 
 from scraper.exporters.anki import export_anki
+from scraper.exporters.canvas_qti import export_canvas_qti
 from scraper.exporters.csv_export import export_csv
 from scraper.exporters.json_export import export_json
 from scraper.exporters.kahoot import export_kahoot
@@ -16,6 +17,7 @@ EXPORTERS = {
     "kahoot": export_kahoot,
     "moodle_gift": export_moodle_gift,
     "moodle_xml": export_moodle_xml,
+    "canvas_qti": export_canvas_qti,
 }
 
 ALL_FORMATS = list(EXPORTERS.keys())

@@ -2,7 +2,7 @@
 
 A Python + Selenium scraper that logs into [Core Knowledge for Lawyers](https://coreknowledgeforlawyers.com), discovers practice sets and chapters, and extracts quiz questions with answer choices, correct answers, and explanations.
 
-Exports to **7 formats**: JSON, CSV, Anki, Quizlet, Kahoot, Moodle GIFT, and Moodle XML.
+Exports to **8 formats**: JSON, CSV, Anki, Quizlet, Kahoot, Moodle GIFT, Moodle XML, and Canvas QTI.
 
 ## Setup
 
@@ -41,7 +41,7 @@ python main.py --practice-set "Civil Procedure" --chapter "Subject Matter"
 python main.py --chapter-url "https://coreknowledgeforlawyers.com/..."
 
 # Export only specific formats
-python main.py --format json anki moodle_gift
+python main.py --format json anki moodle_gift canvas_qti
 
 # Debug mode (visible browser + verbose logging)
 python main.py --no-headless -v
@@ -51,6 +51,12 @@ python main.py --fresh
 
 # Custom output directory
 python main.py -o my_results
+
+# Preview what would be scraped without actually scraping
+python main.py --dry-run
+
+# Save log output to a file
+python main.py --log-file scrape.log
 ```
 
 ### CLI Options
@@ -67,6 +73,8 @@ python main.py -o my_results
 | `--fresh` | Ignore saved progress, re-scrape everything |
 | `--delay SECONDS` | Delay between questions (default: 1.0) |
 | `--verbose, -v` | Debug-level logging |
+| `--dry-run` | Discover structure without scraping questions |
+| `--log-file PATH` | Also write log output to a file |
 
 ## Export Formats
 
@@ -79,6 +87,7 @@ python main.py -o my_results
 | **Kahoot** | `quizzes_kahoot.csv` | Kahoot → Create → Import Spreadsheet |
 | **Moodle GIFT** | `quizzes_moodle.gift` | Moodle → Question Bank → Import → GIFT |
 | **Moodle XML** | `quizzes_moodle.xml` | Moodle → Question Bank → Import → Moodle XML |
+| **Canvas QTI** | `quizzes_canvas_qti.zip` | Canvas → Import Content → QTI .zip |
 
 ### JSON Structure
 
@@ -118,6 +127,15 @@ Progress is automatically saved after each chapter. If the scraper is interrupte
 ### Cookie Persistence
 After a successful login, cookies are saved to `.ckl_cookies.json`. On the next run, the scraper tries these cookies first to avoid re-entering credentials. Delete the file to force a fresh login.
 
+### Dry Run Mode
+Use `--dry-run` to discover and list all practice sets and chapters without actually scraping any questions. Useful for previewing scope before a long scrape.
+
+### Log to File
+Use `--log-file scrape.log` to save all log output to a file in addition to the console. Useful for reviewing scrape history or debugging issues after the fact.
+
+### Summary Statistics
+After scraping completes, a detailed summary is printed including question counts per practice set, question type breakdown, explanation coverage, average time per question, and exported file sizes.
+
 ### Automatic Diagnostics
 When something goes wrong (login failure, missing elements, parse errors), the scraper automatically captures:
 - **Screenshots** → `debug_screenshots/*.png`
@@ -127,6 +145,16 @@ These files help diagnose issues without needing `--no-headless`.
 
 ### Rate Limiting
 A configurable delay (default 1 second) is applied between questions to avoid overloading the server. Adjust with `--delay` or `CKL_REQUEST_DELAY`.
+
+## Testing
+
+Run the test suite with pytest:
+
+```bash
+pytest tests/ -v
+```
+
+Tests cover all 8 export formats including output validation, edge cases, special character escaping, and the export dispatcher.
 
 ## Project Structure
 
@@ -145,7 +173,11 @@ ckl-quiz-scraper/
 │       ├── quizlet.py               # Quizlet TSV
 │       ├── kahoot.py                # Kahoot spreadsheet
 │       ├── moodle_gift.py           # Moodle GIFT
-│       └── moodle_xml.py            # Moodle XML
+│       ├── moodle_xml.py            # Moodle XML
+│       └── canvas_qti.py            # Canvas QTI 1.2
+├── tests/
+│   ├── conftest.py                  # Shared test fixtures
+│   └── test_exporters.py           # Exporter unit tests (42 tests)
 ├── output/                          # Exported files (gitignored)
 ├── debug_screenshots/               # Error diagnostics (gitignored)
 ├── requirements.txt
@@ -164,3 +196,4 @@ ckl-quiz-scraper/
 | Scraper interrupted | Just re-run — it resumes from saved progress automatically. |
 | Rate limited by site | Increase `--delay` (e.g., `--delay 3`). |
 | Stale export data | Delete `.ckl_progress.json` or use `--fresh`. |
+| Canvas import fails | Canvas fails silently on invalid QTI. Check zip contents. |

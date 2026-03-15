@@ -3,11 +3,12 @@
 
 Navigates Practice Sets → Chapters → Questions, submitting each question
 to capture the correct answer and explanation. Exports to multiple formats
-including JSON, CSV, Anki, Quizlet, Kahoot, and Moodle.
+including JSON, CSV, Anki, Quizlet, Kahoot, Moodle, and Canvas QTI.
 """
 
 import argparse
 import logging
+import os
 import sys
 import time
 
@@ -23,12 +24,21 @@ from scraper.quiz_scraper import (
 )
 
 
-def setup_logging(verbose=False):
+def setup_logging(verbose=False, log_file=None):
+    """Configure logging to console and optionally to a file."""
     level = logging.DEBUG if verbose else logging.INFO
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt = "%H:%M:%S"
+
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        format=fmt,
+        datefmt=datefmt,
+        handlers=handlers,
     )
     # Suppress noisy third-party loggers
     logging.getLogger("selenium").setLevel(logging.WARNING)
@@ -49,6 +59,7 @@ export formats:
   kahoot       CSV matching Kahoot spreadsheet template
   moodle_gift  Moodle GIFT plain-text format
   moodle_xml   Moodle XML format with categories and feedback
+  canvas_qti   Canvas LMS QTI 1.2 package (.zip)
 
 examples:
   %(prog)s                                       # scrape everything, all formats
@@ -58,6 +69,8 @@ examples:
   %(prog)s --chapter-url URL                     # scrape one chapter directly
   %(prog)s --fresh                               # ignore previous progress
   %(prog)s --no-headless -v                      # debug mode (visible browser)
+  %(prog)s --dry-run                             # preview what would be scraped
+  %(prog)s --log-file scrape.log                 # save log output to file
 """,
     )
 
@@ -120,9 +133,20 @@ examples:
         action="store_true",
         help="Enable verbose/debug logging",
     )
+    behavior.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Discover practice sets and chapters without scraping questions",
+    )
+    behavior.add_argument(
+        "--log-file",
+        default=None,
+        metavar="PATH",
+        help="Also write log output to a file",
+    )
 
     args = parser.parse_args()
-    setup_logging(args.verbose)
+    setup_logging(args.verbose, args.log_file)
     logger = logging.getLogger(__name__)
 
     # Apply runtime config overrides
@@ -159,6 +183,10 @@ examples:
 
         # Direct chapter URL mode
         if args.chapter_url:
+            if args.dry_run:
+                logger.info("[DRY RUN] Would scrape chapter: %s", args.chapter_url)
+                return
+
             chapter = Chapter(
                 chapter_name="Direct Chapter",
                 launch_url=args.chapter_url,
@@ -234,18 +262,35 @@ examples:
 
                 ps = PracticeSet(title=ps_title, url=ps_url, chapters=chapters)
 
-                for i, chapter in enumerate(chapters, 1):
-                    logger.info(
-                        "----- Chapter %d/%d: %s -----",
-                        i, len(chapters), chapter.chapter_name,
-                    )
-                    scrape_chapter_questions(driver, chapter, resume=not args.fresh)
-                    logger.info(
-                        "  Result: %d question(s) scraped",
-                        len(chapter.questions),
-                    )
+                if args.dry_run:
+                    logger.info("[DRY RUN] Would scrape %d chapter(s):", len(chapters))
+                    for ch in chapters:
+                        logger.info("  - %s [%s]", ch.chapter_name, ch.status)
+                else:
+                    for i, chapter in enumerate(chapters, 1):
+                        logger.info(
+                            "----- Chapter %d/%d: %s -----",
+                            i, len(chapters), chapter.chapter_name,
+                        )
+                        scrape_chapter_questions(driver, chapter, resume=not args.fresh)
+                        logger.info(
+                            "  Result: %d question(s) scraped",
+                            len(chapter.questions),
+                        )
 
                 all_practice_sets.append(ps)
+
+            if args.dry_run:
+                total_chapters = sum(len(ps.chapters) for ps in all_practice_sets)
+                elapsed = time.time() - start_time
+                logger.info("=" * 60)
+                logger.info("DRY RUN SUMMARY")
+                logger.info("=" * 60)
+                logger.info("  Practice sets: %d", len(all_practice_sets))
+                logger.info("  Chapters:      %d", total_chapters)
+                logger.info("  Time elapsed:  %.0f seconds", elapsed)
+                logger.info("Run without --dry-run to scrape questions.")
+                return
 
         # Export results
         total_questions = sum(
@@ -267,6 +312,22 @@ examples:
         total_chapters = sum(len(ps.chapters) for ps in all_practice_sets)
         elapsed = time.time() - start_time
 
+        # Detailed summary statistics
+        question_types = {}
+        chapters_with_explanations = 0
+        total_with_explanations = 0
+        for ps in all_practice_sets:
+            for ch in ps.chapters:
+                ch_has_explanations = False
+                for q in ch.questions:
+                    qt = q.question_type or "Unknown"
+                    question_types[qt] = question_types.get(qt, 0) + 1
+                    if q.explanation:
+                        total_with_explanations += 1
+                        ch_has_explanations = True
+                if ch_has_explanations:
+                    chapters_with_explanations += 1
+
         logger.info("=" * 60)
         logger.info("SCRAPING COMPLETE")
         logger.info("=" * 60)
@@ -274,6 +335,20 @@ examples:
         logger.info("  Chapters:      %d", total_chapters)
         logger.info("  Questions:     %d", total_questions)
         logger.info("  Time elapsed:  %.0f seconds", elapsed)
+        if total_questions > 0:
+            rate = elapsed / total_questions
+            logger.info("  Avg time/question: %.1f seconds", rate)
+        logger.info("  With explanations: %d/%d (%.0f%%)",
+                     total_with_explanations, total_questions,
+                     (total_with_explanations / total_questions * 100) if total_questions else 0)
+        if question_types:
+            logger.info("  Question types:")
+            for qt, count in sorted(question_types.items(), key=lambda x: -x[1]):
+                logger.info("    %-25s %d", qt, count)
+        logger.info("  Per practice set:")
+        for ps in all_practice_sets:
+            ps_q = sum(len(ch.questions) for ch in ps.chapters)
+            logger.info("    %-40s %d ch, %d q", ps.title[:40], len(ps.chapters), ps_q)
 
         formats = args.format  # None means all
         logger.info("Exporting to: %s", ", ".join(formats or ALL_FORMATS))
@@ -281,7 +356,14 @@ examples:
 
         logger.info("Export complete! Files saved:")
         for fmt, path in paths.items():
-            logger.info("  %-12s %s", fmt + ":", path)
+            file_size = os.path.getsize(path) if os.path.exists(path) else 0
+            if file_size < 1024:
+                size_str = f"{file_size} B"
+            elif file_size < 1024 * 1024:
+                size_str = f"{file_size / 1024:.1f} KB"
+            else:
+                size_str = f"{file_size / (1024 * 1024):.1f} MB"
+            logger.info("  %-12s %s (%s)", fmt + ":", path, size_str)
 
     except KeyboardInterrupt:
         logger.info("\nInterrupted by user. Progress has been saved.")
