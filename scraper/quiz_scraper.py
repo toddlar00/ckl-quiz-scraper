@@ -1,11 +1,26 @@
-"""Quiz discovery and scraping logic."""
+"""CKL quiz discovery and scraping logic.
+
+CKL site structure:
+  Home page (after login) → grid of Practice Sets (book covers)
+  Practice Set page → table with chapters, each with "Launch" links
+  Quiz page → one question at a time, "Question X of Y"
+    - "Multiple Choice" label
+    - Question text
+    - Radio buttons A/B/C/D
+    - "Submit" button → reveals correct answer + explanation
+    - "Next Question" button to advance
+"""
 
 import logging
 import re
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
 
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -17,451 +32,629 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QuizQuestion:
-    """Represents a single quiz question with its answers and explanation."""
+    """A single quiz question with choices, correct answer, and explanation."""
     question_number: int
+    total_questions: int
+    question_type: str  # e.g. "Multiple Choice"
     question_text: str
-    choices: list[dict] = field(default_factory=list)  # [{"label": "A", "text": "...", "is_correct": bool}]
+    choices: list[dict] = field(default_factory=list)
     correct_answer: str = ""
     explanation: str = ""
     source_url: str = ""
 
 
 @dataclass
-class Quiz:
-    """Represents a quiz containing multiple questions."""
-    title: str
-    url: str
+class Chapter:
+    """A chapter within a practice set containing quiz questions."""
+    chapter_name: str
+    launch_url: str
+    status: str = ""  # "In Progress", "To Do", etc.
     questions: list[QuizQuestion] = field(default_factory=list)
 
 
-def discover_quiz_links(driver):
-    """Find all quiz-related links on the current site.
+@dataclass
+class PracticeSet:
+    """A practice set (book) containing chapters with questions."""
+    title: str
+    url: str
+    chapters: list[Chapter] = field(default_factory=list)
 
-    Navigates through the site looking for pages containing quizzes.
-    Returns a list of (title, url) tuples.
+
+def discover_practice_sets(driver):
+    """Find all Practice Sets on the home page after login.
+
+    The home page shows a grid of book covers. Each is clickable and
+    leads to a Practice Set page with chapters.
+    Returns list of (title, url) tuples.
     """
     base = config.BASE_URL.rstrip("/")
-    quiz_links = []
-    visited = set()
-
-    # Common paths where quizzes might be found
-    discovery_paths = [
-        "/",
-        "/quizzes",
-        "/quiz",
-        "/courses",
-        "/my-courses",
-        "/dashboard",
-        "/lessons",
-        "/modules",
-        "/practice",
-        "/assessments",
-        "/exams",
-    ]
-
-    for path in discovery_paths:
-        url = base + path
-        if url in visited:
-            continue
-        visited.add(url)
-        try:
-            driver.get(url)
-            time.sleep(2)
-            found = _extract_quiz_links(driver, base)
-            for link in found:
-                if link not in quiz_links:
-                    quiz_links.append(link)
-        except Exception as e:
-            logger.debug("Could not access %s: %s", url, e)
-
-    # Also search by crawling links on visited pages
-    if not quiz_links:
-        quiz_links = _crawl_for_quizzes(driver, base, visited)
-
-    logger.info("Discovered %d quiz link(s)", len(quiz_links))
-    return quiz_links
-
-
-def _extract_quiz_links(driver, base_url):
-    """Extract quiz-related links from the current page."""
-    quiz_keywords = [
-        "quiz", "test", "exam", "assessment", "practice",
-        "question", "review", "attempt",
-    ]
-    links = []
-
-    try:
-        anchors = driver.find_elements(By.TAG_NAME, "a")
-        for anchor in anchors:
-            href = anchor.get_attribute("href") or ""
-            text = anchor.text.strip()
-            if not href or href.startswith("javascript:") or href == "#":
-                continue
-            href_lower = href.lower()
-            text_lower = text.lower()
-            if any(kw in href_lower or kw in text_lower for kw in quiz_keywords):
-                full_url = urljoin(base_url, href)
-                if full_url.startswith(base_url):
-                    links.append((text or full_url, full_url))
-    except Exception as e:
-        logger.debug("Error extracting links: %s", e)
-
-    return links
-
-
-def _crawl_for_quizzes(driver, base_url, visited, max_pages=20):
-    """Crawl site pages looking for quiz content."""
-    quiz_links = []
-    to_visit = []
-
-    # Gather internal links from current page
-    try:
-        anchors = driver.find_elements(By.TAG_NAME, "a")
-        for anchor in anchors:
-            href = anchor.get_attribute("href") or ""
-            if href.startswith(base_url) and href not in visited:
-                to_visit.append(href)
-    except Exception:
-        pass
-
-    pages_checked = 0
-    for url in to_visit:
-        if pages_checked >= max_pages:
-            break
-        if url in visited:
-            continue
-        visited.add(url)
-        pages_checked += 1
-
-        try:
-            driver.get(url)
-            time.sleep(1)
-            found = _extract_quiz_links(driver, base_url)
-            for link in found:
-                if link not in quiz_links:
-                    quiz_links.append(link)
-
-            # Check if current page itself is a quiz
-            if _page_has_quiz_content(driver):
-                title = driver.title or url
-                quiz_links.append((title, url))
-        except Exception:
-            continue
-
-    return quiz_links
-
-
-def _page_has_quiz_content(driver):
-    """Check if the current page contains quiz question content."""
-    quiz_indicators = [
-        ".quiz", ".question", ".quiz-question", ".exam-question",
-        "[class*='quiz']", "[class*='question']", "[id*='quiz']",
-        "form.quiz", ".quiz-form", ".quiz-content",
-    ]
-    for selector in quiz_indicators:
-        try:
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            if elements:
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def scrape_quiz(driver, quiz_url, quiz_title=""):
-    """Scrape all questions from a quiz page.
-
-    Handles both single-page quizzes and multi-page/paginated quizzes.
-    """
-    driver.get(quiz_url)
+    driver.get(base)
     time.sleep(3)
 
-    title = quiz_title or driver.title or "Untitled Quiz"
-    quiz = Quiz(title=title, url=quiz_url)
+    practice_sets = []
 
-    # Try to scrape questions from the current page
-    questions = _scrape_questions_from_page(driver, quiz_url)
-    quiz.questions.extend(questions)
-
-    # Check for pagination / "next" buttons
-    page_num = 1
-    while True:
-        next_btn = _find_next_button(driver)
-        if not next_btn:
-            break
-        try:
-            next_btn.click()
-            time.sleep(2)
-            page_num += 1
-            more_questions = _scrape_questions_from_page(
-                driver, quiz_url, start_num=len(quiz.questions) + 1
-            )
-            if not more_questions:
-                break
-            quiz.questions.extend(more_questions)
-        except Exception as e:
-            logger.warning("Error navigating to next page: %s", e)
-            break
-
-    logger.info(
-        "Scraped %d question(s) from quiz: %s",
-        len(quiz.questions), quiz.title
-    )
-    return quiz
-
-
-def _scrape_questions_from_page(driver, source_url, start_num=1):
-    """Extract quiz questions from the current page."""
-    questions = []
-
-    # Strategy 1: Look for structured question containers
-    question_containers = _find_question_containers(driver)
-    if question_containers:
-        for i, container in enumerate(question_containers):
-            q = _parse_question_container(container, start_num + i, source_url)
-            if q:
-                questions.append(q)
-        return questions
-
-    # Strategy 2: Look for question patterns in the page text
-    questions = _parse_questions_from_text(driver, source_url, start_num)
-    return questions
-
-
-def _find_question_containers(driver):
-    """Find DOM elements that contain individual questions."""
-    container_selectors = [
-        ".quiz-question",
-        ".question",
-        ".question-container",
-        ".question-wrapper",
-        ".quiz-item",
-        ".exam-question",
-        "[class*='question-']",
-        ".wpProQuiz_question",
-        ".ld-question",
-        ".sfwd-question",
-        "div[data-question]",
-        ".quiz_question",
-        ".problem",
-        ".assessment-question",
-    ]
-    for selector in container_selectors:
-        try:
-            containers = driver.find_elements(By.CSS_SELECTOR, selector)
-            if containers:
-                return containers
-        except Exception:
-            continue
-    return []
-
-
-def _parse_question_container(container, question_num, source_url):
-    """Parse a question from a DOM container element."""
+    # The homepage shows book cards/tiles - each has a title and a clickable image/link
+    # Look for links that contain book images or practice set titles
     try:
-        # Extract question text
-        question_text = ""
-        q_text_selectors = [
-            ".question-text", ".question-title", ".question_text",
-            ".wpProQuiz_question_text", ".ld-question-text",
-            "h3", "h4", "p.question", ".question-content",
-        ]
-        for selector in q_text_selectors:
-            els = container.find_elements(By.CSS_SELECTOR, selector)
-            if els and els[0].text.strip():
-                question_text = els[0].text.strip()
-                break
+        # Try finding clickable book containers
+        # Based on the screenshot, each practice set is in a card with:
+        # - A book cover image (clickable)
+        # - A title below it
+        # - Status badge ("IN PROGRESS", "NEW!")
+        # - "Join a Class" link
 
-        if not question_text:
-            # Try getting the first meaningful text from the container
-            all_text = container.text.strip()
-            if all_text:
-                lines = all_text.split("\n")
-                question_text = lines[0].strip()
+        # Strategy: find all links that contain images (book covers)
+        links = driver.find_elements(By.TAG_NAME, "a")
+        seen_urls = set()
 
-        if not question_text:
-            return None
+        for link in links:
+            try:
+                href = link.get_attribute("href") or ""
+                if not href or href == "#" or "javascript:" in href:
+                    continue
+                if href in seen_urls:
+                    continue
 
-        question = QuizQuestion(
-            question_number=question_num,
-            question_text=question_text,
-            source_url=source_url,
-        )
+                # Skip non-internal links
+                if not href.startswith(base):
+                    continue
 
-        # Extract answer choices
-        choice_selectors = [
-            ".answer", ".choice", ".option", ".quiz-answer",
-            "li", ".wpProQuiz_questionListItem",
-            "label", ".answer-option", ".quiz-option",
-            "input[type='radio'] + label",
-            "input[type='radio'] + span",
-        ]
-        for selector in choice_selectors:
-            choices_els = container.find_elements(By.CSS_SELECTOR, selector)
-            if len(choices_els) >= 2:
-                for j, choice_el in enumerate(choices_els):
-                    choice_text = choice_el.text.strip()
-                    if not choice_text:
-                        continue
+                # Skip utility links
+                text = link.text.strip().lower()
+                skip_texts = [
+                    "join a class", "get more practice sets", "home",
+                    "help", "my account", "log out", "support",
+                    "forgot", "create", "carolina academic",
+                    "faculty", "archived", "expired",
+                ]
+                if any(s in text for s in skip_texts):
+                    continue
+                if not text and not link.find_elements(By.TAG_NAME, "img"):
+                    continue
 
-                    is_correct = _is_correct_answer(choice_el)
-                    label = chr(65 + j)  # A, B, C, D...
+                # Get title from link text or nearby elements
+                title = link.text.strip()
+                if not title:
+                    # Try getting title from parent container
+                    try:
+                        parent = link.find_element(By.XPATH, "./..")
+                        title = parent.text.strip()
+                    except Exception:
+                        title = href
 
-                    question.choices.append({
-                        "label": label,
-                        "text": choice_text,
-                        "is_correct": is_correct,
-                    })
+                # Filter to likely practice set links (not homepage anchors)
+                if title and href != base + "/" and href != base:
+                    seen_urls.add(href)
+                    practice_sets.append((title, href))
 
-                    if is_correct:
-                        question.correct_answer = f"{label}. {choice_text}"
-                break
-
-        # Extract explanation
-        explanation_selectors = [
-            ".explanation", ".answer-explanation", ".quiz-explanation",
-            ".wpProQuiz_response", ".feedback", ".rationale",
-            ".answer-feedback", ".solution", ".correct-response",
-            "[class*='explanation']", "[class*='feedback']",
-        ]
-        for selector in explanation_selectors:
-            expl_els = container.find_elements(By.CSS_SELECTOR, selector)
-            if expl_els:
-                explanation_text = expl_els[0].text.strip()
-                if explanation_text:
-                    question.explanation = explanation_text
-                    break
-
-        return question
-
-    except Exception as e:
-        logger.debug("Error parsing question container: %s", e)
-        return None
-
-
-def _is_correct_answer(element):
-    """Determine if an answer choice element is marked as correct."""
-    try:
-        classes = element.get_attribute("class") or ""
-        correct_indicators = ["correct", "right", "selected", "active", "success"]
-        if any(ind in classes.lower() for ind in correct_indicators):
-            return True
-
-        # Check for a checkmark or correct icon
-        icons = element.find_elements(
-            By.CSS_SELECTOR, ".correct-icon, .check, .fa-check, .dashicons-yes"
-        )
-        if icons:
-            return True
-
-        # Check data attributes
-        data_correct = element.get_attribute("data-correct")
-        if data_correct and data_correct.lower() in ("true", "1", "yes"):
-            return True
-
-    except Exception:
-        pass
-    return False
-
-
-def _parse_questions_from_text(driver, source_url, start_num=1):
-    """Fallback: parse questions from raw page text using regex patterns."""
-    questions = []
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-
-        # Pattern: numbered questions like "1. What is..." or "Question 1:"
-        q_pattern = re.compile(
-            r'(?:^|\n)\s*(?:Question\s+)?(\d+)[.):]\s*(.+?)(?=\n\s*(?:Question\s+)?\d+[.):]\s|\Z)',
-            re.DOTALL | re.IGNORECASE
-        )
-
-        matches = q_pattern.findall(body_text)
-        for i, (num, text) in enumerate(matches):
-            text = text.strip()
-            if len(text) < 10:
+            except StaleElementReferenceException:
                 continue
 
-            question = QuizQuestion(
-                question_number=start_num + i,
-                question_text=text.split("\n")[0].strip(),
-                source_url=source_url,
-            )
+    except Exception as e:
+        logger.error("Error discovering practice sets: %s", e)
 
-            # Try to extract choices (A. ... B. ... C. ... D. ...)
-            choice_pattern = re.compile(r'([A-D])[.)]\s*(.+?)(?=[A-D][.)]\s|$)', re.DOTALL)
-            choice_matches = choice_pattern.findall(text)
-            for label, choice_text in choice_matches:
-                question.choices.append({
-                    "label": label,
-                    "text": choice_text.strip(),
-                    "is_correct": False,
-                })
+    # Deduplicate by URL, keeping first occurrence
+    unique = []
+    seen = set()
+    for title, url in practice_sets:
+        if url not in seen:
+            seen.add(url)
+            unique.append((title, url))
 
-            questions.append(question)
+    logger.info("Discovered %d practice set(s)", len(unique))
+    for title, url in unique:
+        logger.info("  - %s", title)
+
+    return unique
+
+
+def discover_chapters(driver, practice_set_url):
+    """Navigate to a Practice Set and find all chapter "Launch" links.
+
+    The Practice Set page has a table under "A. Practice Questions" with:
+    - Checkbox column
+    - "Launch" link
+    - Chapter name (e.g. "Chapter 2: Subject Matter Jurisdiction")
+    - Complete Date / MDT columns
+    - Status ("In Progress", "To Do")
+
+    Returns list of Chapter objects.
+    """
+    driver.get(practice_set_url)
+    time.sleep(3)
+
+    chapters = []
+
+    try:
+        # Find all "Launch" links on the page
+        launch_links = driver.find_elements(By.PARTIAL_LINK_TEXT, "Launch")
+
+        for launch_link in launch_links:
+            try:
+                href = launch_link.get_attribute("href") or ""
+                if not href:
+                    continue
+
+                # Get the chapter name from the same row
+                row = launch_link.find_element(By.XPATH, "./ancestor::tr")
+                cells = row.find_elements(By.TAG_NAME, "td")
+
+                chapter_name = ""
+                status = ""
+
+                for cell in cells:
+                    cell_text = cell.text.strip()
+                    # The chapter name cell contains text like "Chapter 2: ..."
+                    if cell_text.startswith("Chapter") or ":" in cell_text:
+                        if len(cell_text) > 5 and cell_text != "Launch":
+                            chapter_name = cell_text
+                    # Status cell
+                    if cell_text in ("To Do", "In Progress", "Complete", "Completed"):
+                        status = cell_text
+
+                if not chapter_name:
+                    # Fallback: get all text from the row
+                    row_text = row.text.strip()
+                    # Remove "Launch" and status from the text
+                    chapter_name = row_text.replace("Launch", "").strip()
+
+                chapters.append(Chapter(
+                    chapter_name=chapter_name,
+                    launch_url=href,
+                    status=status,
+                ))
+
+            except (StaleElementReferenceException, NoSuchElementException):
+                continue
 
     except Exception as e:
-        logger.debug("Error parsing text for questions: %s", e)
+        logger.error("Error discovering chapters: %s", e)
 
+    logger.info("Found %d chapter(s) in practice set", len(chapters))
+    for ch in chapters:
+        logger.info("  - %s [%s]", ch.chapter_name, ch.status)
+
+    return chapters
+
+
+def scrape_chapter_questions(driver, chapter):
+    """Scrape all questions from a chapter by launching it and iterating.
+
+    CKL quiz flow:
+    1. Click "Launch" → lands on Question 1 of N
+    2. Page shows: question type, question text, radio choices A-D
+    3. Select an answer, click "Submit"
+    4. Page reveals: "The correct answer is X" + "Here's Why:" explanation
+    5. Click "Next Question" to advance
+    6. Repeat until all N questions are done
+
+    To get the correct answer and explanation, we must submit an answer
+    for each question. We select option A by default (the answer doesn't
+    matter since we read the correct answer from the feedback).
+    """
+    driver.get(chapter.launch_url)
+    time.sleep(3)
+
+    questions = []
+
+    # Determine total questions from "Question X of Y" indicator
+    total = _get_total_questions(driver)
+    logger.info("Chapter has %s question(s)", total or "unknown")
+
+    question_num = 0
+    max_questions = 200  # safety limit
+
+    while question_num < max_questions:
+        question_num += 1
+
+        try:
+            q = _scrape_single_question(driver, question_num, total or 0)
+            if q:
+                questions.append(q)
+                logger.debug(
+                    "  Q%d: %s... -> %s",
+                    q.question_number,
+                    q.question_text[:60],
+                    q.correct_answer,
+                )
+            else:
+                logger.warning("  Could not parse question %d", question_num)
+
+            # Try to go to next question
+            if not _click_next_question(driver):
+                logger.info("  No more questions (scraped %d)", len(questions))
+                break
+
+        except Exception as e:
+            logger.warning("  Error on question %d: %s", question_num, e)
+            # Try to recover by clicking Next
+            if not _click_next_question(driver):
+                break
+
+    chapter.questions = questions
     return questions
 
 
-def _find_next_button(driver):
-    """Find a 'Next' or pagination button on the current page."""
-    next_selectors = [
-        "button.next", "a.next", ".next-btn", "#next-btn",
-        "button.quiz-next", ".quiz-next-btn",
-        "[class*='next']", "a[rel='next']",
-    ]
-    next_keywords = ["next", "continue", ">>", "next question"]
-
-    for selector in next_selectors:
-        try:
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            for el in elements:
-                if el.is_displayed() and el.is_enabled():
-                    return el
-        except Exception:
-            continue
-
-    # Search by button/link text
+def _get_total_questions(driver):
+    """Extract total question count from 'Question X of Y' text."""
     try:
-        buttons = driver.find_elements(
-            By.CSS_SELECTOR, "button, a.btn, input[type='button'], input[type='submit']"
-        )
-        for btn in buttons:
-            text = btn.text.strip().lower()
-            if text in next_keywords and btn.is_displayed() and btn.is_enabled():
-                return btn
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        match = re.search(r'Question\s+\d+\s+of\s+(\d+)', body_text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+
+    # Also try looking at page source for "of N" pattern
+    try:
+        page = driver.page_source
+        match = re.search(r'(\d+)\s+of\s+(\d+)', page)
+        if match:
+            return int(match.group(2))
     except Exception:
         pass
 
     return None
 
 
-def scrape_quiz_results(driver, quiz_url):
-    """Scrape quiz results/review page where answers and explanations are shown.
+def _scrape_single_question(driver, question_num, total):
+    """Scrape one question: read it, submit an answer, read the feedback.
 
-    Many quiz platforms show correct answers only after submission on a results page.
+    Returns a QuizQuestion with the correct answer and explanation.
     """
-    driver.get(quiz_url)
-    time.sleep(3)
+    wait = WebDriverWait(driver, 10)
+    source_url = driver.current_url
 
-    # Look for "review" or "results" links/buttons
-    review_selectors = [
-        "a[href*='review']", "a[href*='result']",
-        "button.review", ".review-btn", ".view-results",
-        ".quiz-results", ".quiz-review",
-    ]
-    for selector in review_selectors:
-        try:
+    # --- Read the question ---
+
+    # Get question type (e.g. "Multiple Choice")
+    question_type = ""
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        if "Multiple Choice" in body_text:
+            question_type = "Multiple Choice"
+        elif "True/False" in body_text or "True or False" in body_text:
+            question_type = "True/False"
+        elif "Fill in" in body_text:
+            question_type = "Fill in the Blank"
+    except Exception:
+        pass
+
+    # Get question text — it's the paragraph(s) between the question header
+    # and the answer choices
+    question_text = _extract_question_text(driver)
+
+    if not question_text:
+        return None
+
+    # --- Read the answer choices ---
+    choices = _extract_choices(driver)
+
+    # --- Submit an answer to reveal correct answer + explanation ---
+    _submit_answer(driver)
+    time.sleep(2)
+
+    # --- Read the feedback ---
+    correct_answer, explanation = _extract_feedback(driver)
+
+    # Update which choice is correct based on the feedback
+    for choice in choices:
+        if correct_answer and choice["label"] == correct_answer:
+            choice["is_correct"] = True
+
+    return QuizQuestion(
+        question_number=question_num,
+        total_questions=total,
+        question_type=question_type,
+        question_text=question_text,
+        choices=choices,
+        correct_answer=correct_answer,
+        explanation=explanation,
+        source_url=source_url,
+    )
+
+
+def _extract_question_text(driver):
+    """Extract the question text from the current page.
+
+    The question text appears after ">>>> Question <<<<" header and before
+    the radio button choices.
+    """
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+
+        # Remove everything before the question marker
+        marker = ">>>> Question <<<<"
+        if marker in body_text:
+            body_text = body_text.split(marker, 1)[1].strip()
+
+        # Remove everything starting from the first choice label
+        # Choices start with a line containing just "A." or "○ A." pattern
+        lines = body_text.split("\n")
+        question_lines = []
+        for line in lines:
+            stripped = line.strip()
+            # Stop when we hit an answer choice line
+            if re.match(r'^[○●]?\s*[A-D]\.\s', stripped):
+                break
+            # Skip empty lines at start
+            if not question_lines and not stripped:
+                continue
+            # Skip the question type label
+            if stripped in ("Multiple Choice", "True/False", "Fill in the Blank"):
+                continue
+            question_lines.append(stripped)
+
+        question_text = " ".join(question_lines).strip()
+
+        # Clean up multiple spaces
+        question_text = re.sub(r'\s+', ' ', question_text)
+
+        return question_text
+
+    except Exception as e:
+        logger.debug("Error extracting question text: %s", e)
+        return ""
+
+
+def _extract_choices(driver):
+    """Extract answer choices (A, B, C, D) from radio buttons on the page."""
+    choices = []
+
+    try:
+        # Find radio button labels — CKL uses radio inputs with labels
+        # The labels show "A. <text>", "B. <text>", etc.
+        radio_inputs = driver.find_elements(
+            By.CSS_SELECTOR, "input[type='radio']"
+        )
+
+        for radio in radio_inputs:
+            try:
+                # Get the label associated with this radio
+                radio_id = radio.get_attribute("id")
+                label = None
+
+                if radio_id:
+                    labels = driver.find_elements(
+                        By.CSS_SELECTOR, f"label[for='{radio_id}']"
+                    )
+                    if labels:
+                        label = labels[0]
+
+                if not label:
+                    # Try finding label as parent or sibling
+                    try:
+                        label = radio.find_element(By.XPATH, "./ancestor::label")
+                    except NoSuchElementException:
+                        try:
+                            label = radio.find_element(By.XPATH, "./following-sibling::label")
+                        except NoSuchElementException:
+                            pass
+
+                if label:
+                    label_text = label.text.strip()
+                else:
+                    # Get text from parent container
+                    parent = radio.find_element(By.XPATH, "./..")
+                    label_text = parent.text.strip()
+
+                if not label_text:
+                    continue
+
+                # Parse "A. Some answer text" or just get the letter
+                match = re.match(r'^([A-D])\.\s*(.*)', label_text, re.DOTALL)
+                if match:
+                    letter = match.group(1)
+                    text = match.group(2).strip()
+                else:
+                    # Assign letter based on order
+                    letter = chr(65 + len(choices))
+                    text = label_text
+
+                choices.append({
+                    "label": letter,
+                    "text": text,
+                    "is_correct": False,
+                })
+
+            except (StaleElementReferenceException, NoSuchElementException):
+                continue
+
+    except Exception as e:
+        logger.debug("Error extracting choices: %s", e)
+
+    # Fallback: parse from body text if no radio buttons found
+    if not choices:
+        choices = _extract_choices_from_text(driver)
+
+    return choices
+
+
+def _extract_choices_from_text(driver):
+    """Fallback: extract choices from page text using regex."""
+    choices = []
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        pattern = re.compile(r'([A-D])\.\s+(.+?)(?=\n\s*[A-D]\.\s|\nSubmit|\Z)', re.DOTALL)
+        matches = pattern.findall(body_text)
+
+        for label, text in matches:
+            text = text.strip()
+            if text and len(text) > 1:
+                choices.append({
+                    "label": label,
+                    "text": re.sub(r'\s+', ' ', text),
+                    "is_correct": False,
+                })
+    except Exception:
+        pass
+
+    return choices
+
+
+def _submit_answer(driver):
+    """Select the first available radio button and click Submit.
+
+    We need to submit an answer to reveal the correct answer and explanation.
+    The choice we select doesn't matter — we read the correct answer from feedback.
+    """
+    try:
+        # Select the first radio button (option A)
+        radios = driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+        if radios:
+            # Click the first radio that's visible and enabled
+            for radio in radios:
+                if radio.is_displayed() and radio.is_enabled():
+                    try:
+                        radio.click()
+                    except Exception:
+                        # Try JavaScript click as fallback
+                        driver.execute_script("arguments[0].click();", radio)
+                    break
+
+        time.sleep(1)
+
+        # Click the "Submit" button
+        submit_btn = None
+
+        # Try by button text
+        buttons = driver.find_elements(By.TAG_NAME, "button")
+        for btn in buttons:
+            if btn.text.strip().lower() == "submit" and btn.is_displayed():
+                submit_btn = btn
+                break
+
+        if not submit_btn:
+            # Try input[type='submit']
+            submits = driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
+            for btn in submits:
+                if btn.is_displayed():
+                    submit_btn = btn
+                    break
+
+        if not submit_btn:
+            # Try by value attribute
+            submits = driver.find_elements(By.CSS_SELECTOR, "input[value='Submit'], button[value='Submit']")
+            for btn in submits:
+                if btn.is_displayed():
+                    submit_btn = btn
+                    break
+
+        if submit_btn:
+            submit_btn.click()
+            time.sleep(2)
+        else:
+            logger.warning("Could not find Submit button")
+
+    except Exception as e:
+        logger.warning("Error submitting answer: %s", e)
+
+
+def _extract_feedback(driver):
+    """Extract the correct answer letter and explanation from feedback.
+
+    After submitting, the page shows feedback like:
+        "Sorry! You are incorrect."
+        "The correct answer is C."
+        "Here's Why:"
+        "<explanation text>"
+
+    Or for correct answers:
+        "Correct!"
+        "Here's Why:"
+        "<explanation text>"
+    """
+    correct_answer = ""
+    explanation = ""
+
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+
+        # Extract correct answer letter: "The correct answer is C."
+        match = re.search(
+            r'The correct answer is\s+([A-D])',
+            body_text,
+            re.IGNORECASE,
+        )
+        if match:
+            correct_answer = match.group(1).upper()
+
+        # If user got it right, the feedback might not say "correct answer is"
+        # Look for "Correct!" without "incorrect"
+        if not correct_answer:
+            if re.search(r'\bCorrect[!.]', body_text) and "incorrect" not in body_text.lower():
+                # The selected answer was correct — we selected A
+                correct_answer = "A"
+
+        # Extract explanation: everything after "Here's Why:"
+        heres_why_match = re.search(
+            r"Here'?s\s+Why:?\s*(.+?)(?=Check this box|You will be able|I'm still confused|Next Question|Back to Practice|$)",
+            body_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if heres_why_match:
+            explanation = heres_why_match.group(1).strip()
+            # Clean up whitespace
+            explanation = re.sub(r'\n\s*\n', '\n', explanation)
+            explanation = explanation.strip()
+
+    except Exception as e:
+        logger.debug("Error extracting feedback: %s", e)
+
+    return correct_answer, explanation
+
+
+def _click_next_question(driver):
+    """Click the 'Next Question' button to advance to the next question.
+
+    Returns True if successfully navigated, False if no button found
+    (meaning we've reached the end).
+    """
+    try:
+        # Look for "Next Question" link/button — in the screenshot it's
+        # a button/link at the bottom right
+        next_selectors = [
+            "a",
+            "button",
+            "input[type='button']",
+            "input[type='submit']",
+        ]
+
+        for selector in next_selectors:
             elements = driver.find_elements(By.CSS_SELECTOR, selector)
             for el in elements:
-                if el.is_displayed():
-                    el.click()
-                    time.sleep(3)
-                    break
-        except Exception:
-            continue
+                try:
+                    text = (el.text or el.get_attribute("value") or "").strip()
+                    if "next question" in text.lower() and el.is_displayed():
+                        el.click()
+                        time.sleep(3)
+                        return True
+                except StaleElementReferenceException:
+                    continue
 
-    return scrape_quiz(driver, driver.current_url)
+        # Try finding by partial link text
+        try:
+            next_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Next Question")
+            if next_link.is_displayed():
+                next_link.click()
+                time.sleep(3)
+                return True
+        except NoSuchElementException:
+            pass
+
+        # Try XPath for any element containing "Next Question"
+        try:
+            next_el = driver.find_element(
+                By.XPATH, "//*[contains(text(), 'Next Question')]"
+            )
+            if next_el.is_displayed():
+                next_el.click()
+                time.sleep(3)
+                return True
+        except NoSuchElementException:
+            pass
+
+    except Exception as e:
+        logger.debug("Error clicking Next Question: %s", e)
+
+    return False
