@@ -624,6 +624,69 @@ class WestAcademicScraper(BaseScraper):
             logger.warning("  Could not determine correct answer from feedback")
         return correct_answer, explanation
 
+    def extract_choice_explanations(self, body_text, choices, correct_answer):
+        """Extract per-choice explanations from West Academic feedback.
+
+        West Academic (Exam Pro) typically provides:
+          - General explanation/rationale for the correct answer
+          - Sometimes per-choice feedback elements in the DOM
+          - Sometimes labeled feedback like "A. Correct because..."
+        """
+        explanations = {}
+
+        # Pattern 1: Per-choice labeled feedback "A. reason" or "A) reason"
+        per_choice = re.findall(
+            r'([A-D])[.)]\s+(.+?)(?:(?:Correct|Incorrect)[.!]?\s*)(.*?)(?=[A-D][.)]\s|\Z)',
+            body_text, re.DOTALL | re.IGNORECASE,
+        )
+        if per_choice:
+            for label, _, reason in per_choice:
+                reason = re.sub(r'\s+', ' ', reason).strip()
+                if reason:
+                    explanations[label.upper()] = reason
+
+        # Pattern 2: DOM-based per-choice feedback elements
+        if not explanations:
+            try:
+                feedback_els = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".answer-feedback, .choice-feedback, .option-feedback, "
+                    "[class*='feedback'], [class*='rationale'], [class*='explanation']"
+                )
+                for el in feedback_els:
+                    text = el.text.strip()
+                    if not text:
+                        continue
+                    match = re.match(r'^([A-D])[.):\s]+(.+)', text, re.DOTALL)
+                    if match:
+                        label = match.group(1).upper()
+                        reason = re.sub(r'\s+', ' ', match.group(2)).strip()
+                        if reason:
+                            explanations[label] = reason
+            except Exception:
+                pass
+
+        # Fallback: generate from general explanation
+        if not explanations and correct_answer:
+            general = ""
+            for pattern in [
+                r"(?:Explanation|Rationale|Feedback)[:\s]*(.+?)(?=\bNext\b|\bSubmit\b|$)",
+                r"Here'?s\s+[Ww]hy:?\s*(.+?)(?=\bNext\b|\bSubmit\b|$)",
+            ]:
+                match = re.search(pattern, body_text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    general = re.sub(r'\s+', ' ', match.group(1)).strip()
+                    break
+
+            for choice in choices:
+                label = choice["label"]
+                if label == correct_answer:
+                    explanations[label] = f"Correct. {general}" if general else "Correct."
+                else:
+                    explanations[label] = f"Incorrect. The correct answer is {correct_answer}." + (f" {general}" if general else "")
+
+        return explanations
+
     def click_next_question(self):
         """Navigate to the next question."""
         next_texts = ["next question", "next", "continue", ">>"]

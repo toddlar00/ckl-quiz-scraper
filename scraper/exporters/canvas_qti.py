@@ -154,7 +154,17 @@ def _add_question_item(section, q, question_id):
             "linkrefid": f"{q_ident}_incorrect_fb",
         })
 
-    # Feedback blocks
+    # Per-choice feedback blocks
+    for choice in q.choices:
+        choice_expl = choice.get("explanation", "")
+        if choice_expl:
+            choice_fb = SubElement(item, "itemfeedback", ident=f"{q_ident}_{choice['label']}_fb")
+            flow_mat_c = SubElement(choice_fb, "flow_mat")
+            mat_c = SubElement(flow_mat_c, "material")
+            mt_c = SubElement(mat_c, "mattext", texttype="text/html")
+            mt_c.text = f"<![CDATA[<p>{choice_expl}</p>]]>"
+
+    # General correct/incorrect feedback blocks
     if q.explanation:
         correct_fb = SubElement(item, "itemfeedback", ident=f"{q_ident}_correct_fb")
         flow_mat = SubElement(correct_fb, "flow_mat")

@@ -58,10 +58,17 @@ def export_moodle_gift(practice_sets, output_dir="output"):
                         is_correct = choice.get("is_correct", False)
                         prefix = "=" if is_correct else "~"
 
-                        if is_correct and explanation:
-                            f.write(f"  {prefix}{c_text}#{explanation}\n")
-                        elif not is_correct and explanation:
-                            f.write(f"  {prefix}{c_text}#{explanation}\n")
+                        # Use per-choice explanation if available, fall back to general
+                        choice_expl = choice.get("explanation", "")
+                        if choice_expl:
+                            fb = _escape_gift(choice_expl)
+                        elif explanation:
+                            fb = explanation
+                        else:
+                            fb = ""
+
+                        if fb:
+                            f.write(f"  {prefix}{c_text}#{fb}\n")
                         else:
                             f.write(f"  {prefix}{c_text}\n")
 

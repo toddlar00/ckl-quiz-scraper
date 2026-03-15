@@ -44,6 +44,18 @@ class TestJsonExport:
         assert len(q["choices"]) == 4
         assert any(c["is_correct"] for c in q["choices"])
 
+    def test_choice_explanations(self, tmp_path, sample_practice_sets):
+        path = export_json(sample_practice_sets, str(tmp_path))
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        q = data[0]["chapters"][0]["questions"][0]
+        assert "choice_explanations" in q
+        assert "A" in q["choice_explanations"]
+        assert "Correct" in q["choice_explanations"]["A"]
+        # Each choice dict also has explanation
+        assert "explanation" in q["choices"][0]
+        assert "Correct" in q["choices"][0]["explanation"]
+
     def test_empty_practice_sets(self, tmp_path, empty_practice_sets):
         path = export_json(empty_practice_sets, str(tmp_path))
         with open(path, encoding="utf-8") as f:
@@ -83,8 +95,18 @@ class TestCsvExport:
             row = next(reader)
         expected = {"practice_set", "chapter", "question_number", "total_questions",
                     "question_type", "question_text", "choice_a", "choice_b",
-                    "choice_c", "choice_d", "correct_answer", "explanation", "source_url"}
+                    "choice_c", "choice_d", "correct_answer", "explanation",
+                    "explanation_a", "explanation_b", "explanation_c", "explanation_d",
+                    "source_url"}
         assert expected == set(row.keys())
+
+    def test_per_choice_explanations(self, tmp_path, sample_practice_sets):
+        path = export_csv(sample_practice_sets, str(tmp_path))
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            row = next(reader)
+        assert "Correct" in row["explanation_a"]
+        assert "Incorrect" in row["explanation_b"]
 
     def test_empty_export(self, tmp_path, empty_practice_sets):
         path = export_csv(empty_practice_sets, str(tmp_path))

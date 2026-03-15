@@ -53,4 +53,10 @@ def _build_definition(q):
         parts.append(f"Answer: {q.correct_answer}")
     if q.explanation:
         parts.append(q.explanation)
+    # Per-choice explanations
+    for choice in q.choices:
+        expl = choice.get("explanation", "")
+        if expl:
+            label = choice.get("label", "")
+            parts.append(f"{label}: {expl}")
     return " | ".join(parts).replace("\t", " ").replace("\n", " | ")

@@ -279,6 +279,81 @@ class CKLScraper(BaseScraper):
             logger.warning("  Could not determine correct answer from feedback")
         return correct_answer, explanation
 
+    def extract_choice_explanations(self, body_text, choices, correct_answer):
+        """Extract per-choice explanations from CKL feedback page.
+
+        CKL feedback may include:
+          - "A. <choice text> — Correct/Incorrect. <reason>"
+          - Lettered explanations like "A) <reason>"
+          - General explanation applied to correct answer, with generic
+            "Incorrect" note for wrong answers.
+        """
+        explanations = {}
+
+        # Pattern 1: Labeled per-choice feedback "A. ... Correct/Incorrect ..."
+        per_choice = re.findall(
+            r'([A-D])\.\s+.+?(?:Correct|Incorrect)[.!]?\s*(.*?)(?=[A-D]\.\s|Check this box|Next Question|Back to Practice|$)',
+            body_text, re.DOTALL | re.IGNORECASE,
+        )
+        if per_choice:
+            for label, reason in per_choice:
+                reason = re.sub(r'\s+', ' ', reason).strip()
+                if reason:
+                    explanations[label.upper()] = reason
+
+        # Pattern 2: Feedback blocks keyed by letter "A) reason" or "A: reason"
+        if not explanations:
+            per_choice2 = re.findall(
+                r'([A-D])[):]\s+(.+?)(?=[A-D][):]|\Z)',
+                body_text, re.DOTALL,
+            )
+            # Only use if these look like feedback (post-submit), not choices
+            if per_choice2 and correct_answer:
+                for label, reason in per_choice2:
+                    reason = re.sub(r'\s+', ' ', reason).strip()
+                    if len(reason) > 10:  # Skip very short fragments
+                        explanations[label.upper()] = reason
+
+        # Pattern 3: DOM-based — look for per-choice feedback elements
+        if not explanations:
+            try:
+                feedback_els = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".feedback, .answer-feedback, .choice-feedback, "
+                    "[class*='feedback'], [class*='explanation']"
+                )
+                for el in feedback_els:
+                    text = el.text.strip()
+                    if not text:
+                        continue
+                    match = re.match(r'^([A-D])[.):\s]+(.+)', text, re.DOTALL)
+                    if match:
+                        label = match.group(1).upper()
+                        reason = re.sub(r'\s+', ' ', match.group(2)).strip()
+                        if reason:
+                            explanations[label] = reason
+            except Exception:
+                pass
+
+        # Fallback: apply general explanation to correct answer, generic note to others
+        if not explanations and correct_answer:
+            general = ""
+            heres_why = re.search(
+                r"Here'?s\s+Why:?\s*(.+?)(?=Check this box|You will be able|I'm still confused|Next Question|Back to Practice|$)",
+                body_text, re.DOTALL | re.IGNORECASE,
+            )
+            if heres_why:
+                general = re.sub(r'\s+', ' ', heres_why.group(1)).strip()
+
+            for choice in choices:
+                label = choice["label"]
+                if label == correct_answer:
+                    explanations[label] = f"Correct. {general}" if general else "Correct."
+                else:
+                    explanations[label] = f"Incorrect. The correct answer is {correct_answer}." + (f" {general}" if general else "")
+
+        return explanations
+
     def click_next_question(self):
         try:
             try:

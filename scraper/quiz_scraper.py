@@ -189,7 +189,12 @@ def reset_adaptive_delay():
 
 @dataclass
 class QuizQuestion:
-    """A single quiz question with choices, correct answer, and explanation."""
+    """A single quiz question with choices, correct answer, and explanation.
+
+    Each choice dict has keys: label, text, is_correct, explanation.
+    The top-level `explanation` is the general/correct-answer explanation.
+    Per-choice explanations explain why each specific choice is correct or incorrect.
+    """
     question_number: int
     total_questions: int
     question_type: str  # e.g. "Multiple Choice"
@@ -197,6 +202,7 @@ class QuizQuestion:
     choices: list[dict] = field(default_factory=list)
     correct_answer: str = ""
     explanation: str = ""
+    choice_explanations: dict = field(default_factory=dict)  # {"A": "...", "B": "..."}
     source_url: str = ""
 
 

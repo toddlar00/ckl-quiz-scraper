@@ -65,14 +65,25 @@ def _build_front(q):
 
 
 def _build_back(q):
-    """Build the back of the Anki card (answer + explanation)."""
+    """Build the back of the Anki card (answer + per-choice explanations)."""
     lines = []
 
     if q.correct_answer:
         lines.append(f"<b>Correct Answer: {q.correct_answer}</b><br><br>")
 
     if q.explanation:
-        lines.append(f"<b>Explanation:</b><br>{q.explanation.replace(chr(10), '<br>')}")
+        lines.append(f"<b>Explanation:</b><br>{q.explanation.replace(chr(10), '<br>')}<br><br>")
+
+    # Per-choice explanations
+    if q.choice_explanations:
+        lines.append("<b>Answer Analysis:</b><br>")
+        for choice in q.choices:
+            label = choice.get("label", "")
+            expl = choice.get("explanation", "") or q.choice_explanations.get(label, "")
+            if expl:
+                is_correct = choice.get("is_correct", False)
+                marker = "&#10004;" if is_correct else "&#10008;"
+                lines.append(f"{marker} <b>{label}.</b> {expl}<br>")
 
     return "".join(lines).replace("\t", " ")
 

@@ -67,10 +67,13 @@ def export_moodle_xml(practice_sets, output_dir="output"):
                     a_text = SubElement(answer, "text")
                     a_text.text = f"<![CDATA[<p>{choice['text']}</p>]]>"
 
-                    # Per-answer feedback
+                    # Per-answer feedback (use choice-specific explanation if available)
                     fb = SubElement(answer, "feedback", format="html")
                     fb_text = SubElement(fb, "text")
-                    if choice.get("is_correct") and q.explanation:
+                    choice_expl = choice.get("explanation", "")
+                    if choice_expl:
+                        fb_text.text = f"<![CDATA[<p>{choice_expl}</p>]]>"
+                    elif choice.get("is_correct") and q.explanation:
                         fb_text.text = f"<![CDATA[<p>Correct! {q.explanation}</p>]]>"
                     elif not choice.get("is_correct") and q.correct_answer:
                         fb_text.text = f"<![CDATA[<p>Incorrect. The correct answer is {q.correct_answer}.</p>]]>"

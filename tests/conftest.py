@@ -6,20 +6,30 @@ from scraper.quiz_scraper import Chapter, PracticeSet, QuizQuestion
 
 @pytest.fixture
 def sample_question():
-    """A single multiple-choice question with 4 choices."""
+    """A single multiple-choice question with 4 choices and per-choice explanations."""
     return QuizQuestion(
         question_number=1,
         total_questions=5,
         question_type="Multiple Choice",
         question_text="What is the standard of review for a motion to dismiss?",
         choices=[
-            {"label": "A", "text": "De novo review", "is_correct": True},
-            {"label": "B", "text": "Abuse of discretion", "is_correct": False},
-            {"label": "C", "text": "Clearly erroneous", "is_correct": False},
-            {"label": "D", "text": "Substantial evidence", "is_correct": False},
+            {"label": "A", "text": "De novo review", "is_correct": True,
+             "explanation": "Correct. De novo review applies because a motion to dismiss presents a legal question."},
+            {"label": "B", "text": "Abuse of discretion", "is_correct": False,
+             "explanation": "Incorrect. Abuse of discretion applies to discretionary rulings, not legal questions."},
+            {"label": "C", "text": "Clearly erroneous", "is_correct": False,
+             "explanation": "Incorrect. Clearly erroneous applies to findings of fact, not legal conclusions."},
+            {"label": "D", "text": "Substantial evidence", "is_correct": False,
+             "explanation": "Incorrect. Substantial evidence is used for administrative agency review."},
         ],
         correct_answer="A",
         explanation="A motion to dismiss is reviewed de novo because it is a legal question.",
+        choice_explanations={
+            "A": "Correct. De novo review applies because a motion to dismiss presents a legal question.",
+            "B": "Incorrect. Abuse of discretion applies to discretionary rulings, not legal questions.",
+            "C": "Incorrect. Clearly erroneous applies to findings of fact, not legal conclusions.",
+            "D": "Incorrect. Substantial evidence is used for administrative agency review.",
+        },
         source_url="https://coreknowledgeforlawyers.com/quiz/1",
     )
 
@@ -33,12 +43,13 @@ def sample_question_no_explanation():
         question_type="Multiple Choice",
         question_text="Which court has original jurisdiction?",
         choices=[
-            {"label": "A", "text": "District court", "is_correct": False},
-            {"label": "B", "text": "Supreme Court", "is_correct": True},
-            {"label": "C", "text": "Court of Appeals", "is_correct": False},
+            {"label": "A", "text": "District court", "is_correct": False, "explanation": ""},
+            {"label": "B", "text": "Supreme Court", "is_correct": True, "explanation": ""},
+            {"label": "C", "text": "Court of Appeals", "is_correct": False, "explanation": ""},
         ],
         correct_answer="B",
         explanation="",
+        choice_explanations={},
         source_url="https://coreknowledgeforlawyers.com/quiz/2",
     )
 
@@ -81,11 +92,17 @@ def special_chars_question():
         question_type="Multiple Choice",
         question_text='What does "res judicata" mean? Consider: {claim preclusion} & ~issue preclusion.',
         choices=[
-            {"label": "A", "text": "Claim preclusion: prevents re-litigation", "is_correct": True},
-            {"label": "B", "text": "Issue preclusion = collateral estoppel", "is_correct": False},
+            {"label": "A", "text": "Claim preclusion: prevents re-litigation", "is_correct": True,
+             "explanation": "Correct. Res judicata prevents re-litigation of claims."},
+            {"label": "B", "text": "Issue preclusion = collateral estoppel", "is_correct": False,
+             "explanation": "Incorrect. Issue preclusion is a related but distinct concept."},
         ],
         correct_answer="A",
         explanation='The term "res judicata" literally means "a matter judged." It prevents re-litigation of claims.',
+        choice_explanations={
+            "A": "Correct. Res judicata prevents re-litigation of claims.",
+            "B": "Incorrect. Issue preclusion is a related but distinct concept.",
+        },
         source_url="https://coreknowledgeforlawyers.com/quiz/special",
     )
 

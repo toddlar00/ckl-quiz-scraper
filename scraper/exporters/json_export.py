@@ -37,6 +37,7 @@ def export_json(practice_sets, output_dir="output"):
                     "choices": q.choices,
                     "correct_answer": q.correct_answer,
                     "explanation": q.explanation,
+                    "choice_explanations": q.choice_explanations,
                     "source_url": q.source_url,
                 })
             ps_data["chapters"].append(ch_data)

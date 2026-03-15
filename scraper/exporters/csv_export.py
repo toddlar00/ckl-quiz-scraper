@@ -17,7 +17,9 @@ def export_csv(practice_sets, output_dir="output"):
         "practice_set", "chapter", "question_number", "total_questions",
         "question_type", "question_text",
         "choice_a", "choice_b", "choice_c", "choice_d",
-        "correct_answer", "explanation", "source_url",
+        "correct_answer", "explanation",
+        "explanation_a", "explanation_b", "explanation_c", "explanation_d",
+        "source_url",
     ]
 
     with open(filepath, "w", newline="", encoding="utf-8") as f:
@@ -42,6 +44,7 @@ def export_csv(practice_sets, output_dir="output"):
                         label = choice.get("label", "").upper()
                         if label in ("A", "B", "C", "D"):
                             row[f"choice_{label.lower()}"] = choice.get("text", "")
+                            row[f"explanation_{label.lower()}"] = choice.get("explanation", "")
                     writer.writerow(row)
 
     logger.info("Exported CSV: %s", filepath)

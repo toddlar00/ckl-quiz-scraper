@@ -114,6 +114,23 @@ class BaseScraper(ABC):
     # Optional overrides
     # ------------------------------------------------------------------
 
+    def extract_choice_explanations(self, body_text, choices, correct_answer):
+        """Extract per-choice explanations from post-submit feedback.
+
+        Override this to parse site-specific feedback that explains why each
+        answer choice is correct or incorrect.
+
+        Args:
+            body_text: Post-submit page text.
+            choices: List of choice dicts (label, text, is_correct).
+            correct_answer: The correct answer label (e.g. "A").
+
+        Returns:
+            Dict mapping choice labels to explanation strings.
+            E.g. {"A": "Correct because...", "B": "Incorrect because..."}
+        """
+        return {}
+
     def get_total_questions(self, body_text):
         """Extract total question count from page text. Override if needed.
 
@@ -226,9 +243,14 @@ class BaseScraper(ABC):
         post_body = _get_body_text(self.driver)
         correct_answer, explanation = self.extract_feedback(post_body)
 
+        # Extract per-choice explanations (why each answer is correct/incorrect)
+        choice_explanations = self.extract_choice_explanations(post_body, choices, correct_answer)
+
+        # Mark correct choice and attach per-choice explanations
         for choice in choices:
             if correct_answer and choice["label"] == correct_answer:
                 choice["is_correct"] = True
+            choice["explanation"] = choice_explanations.get(choice["label"], "")
 
         return QuizQuestion(
             question_number=question_num,
@@ -238,5 +260,6 @@ class BaseScraper(ABC):
             choices=choices,
             correct_answer=correct_answer,
             explanation=explanation,
+            choice_explanations=choice_explanations,
             source_url=source_url,
         )
