@@ -39,12 +39,12 @@ class TestAdaptiveDelay:
         ad.on_success()
         assert ad.budget == 8.0
 
-    def test_on_success_min_zero(self):
-        ad = AdaptiveDelay(initial_budget=0.5)
+    def test_on_success_min_floor(self):
+        ad = AdaptiveDelay(initial_budget=1.5)
         ad.on_success()
-        assert ad.budget == 0.0
+        assert ad.budget == 0.5
         ad.on_success()
-        assert ad.budget == 0.0  # doesn't go below 0
+        assert ad.budget == 0.5  # doesn't go below 0.5
 
     def test_on_failure_increases_budget(self):
         ad = AdaptiveDelay(initial_budget=5.0)
@@ -104,11 +104,11 @@ class TestAdaptiveDelay:
         assert abs(total - 1.0) < 0.01
 
     def test_budget_converges_to_minimum(self):
-        """After many successes, budget should reach 0."""
+        """After many successes, budget should reach the 0.5s floor."""
         ad = AdaptiveDelay(initial_budget=5.0)
         for _ in range(10):
             ad.on_success()
-        assert ad.budget == 0.0
+        assert ad.budget == 0.5
 
     def test_failure_recovery(self):
         """After failure, budget increases; then success brings it back down."""

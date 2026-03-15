@@ -68,7 +68,7 @@ class AdaptiveDelay:
 
     def __init__(self, initial_budget=None):
         self._budget = initial_budget or DEFAULT_DELAY_BUDGET
-        self._min_budget = 0.0
+        self._min_budget = 0.5
         self._max_budget = 30.0
         self._consecutive_successes = 0
         self._consecutive_failures = 0
