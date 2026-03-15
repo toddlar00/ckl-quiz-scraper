@@ -192,14 +192,25 @@ examples:
         # Login
         if not args.skip_login:
             logger.info("Logging in...")
-            success = site.login(cfg.USERNAME, cfg.PASSWORD)
+            # Select credentials based on site
+            if args.site == "westacademic":
+                username = cfg.WA_USERNAME or cfg.USERNAME
+                password = cfg.WA_PASSWORD or cfg.PASSWORD
+                cred_hint = "WA_USERNAME/WA_PASSWORD (or CKL_USERNAME/CKL_PASSWORD)"
+            else:
+                username = cfg.USERNAME
+                password = cfg.PASSWORD
+                cred_hint = "CKL_USERNAME/CKL_PASSWORD"
+
+            success = site.login(username, password)
             if not success:
                 logger.error(
                     "Login failed. Troubleshooting steps:\n"
-                    "  1. Check CKL_USERNAME and CKL_PASSWORD in your .env file\n"
+                    "  1. Check %s in your .env file\n"
                     "  2. Run with --no-headless to watch the browser\n"
                     "  3. Check debug_screenshots/ for captured page state\n"
-                    "  4. Ensure the site is accessible: %s", cfg.BASE_URL,
+                    "  4. Ensure the site is accessible: %s",
+                    cred_hint, scraper_cls.BASE_URL,
                 )
                 sys.exit(1)
             logger.info("Login successful!")

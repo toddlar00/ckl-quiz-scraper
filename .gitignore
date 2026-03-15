@@ -7,6 +7,7 @@ venv/
 .venv/
 debug_screenshots/
 .ckl_cookies.json
+.wa_cookies.json
 .ckl_progress.json
 .ckl_adaptive_delay.json
 *.log

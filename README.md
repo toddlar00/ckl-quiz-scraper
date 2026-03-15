@@ -24,6 +24,10 @@ cp .env.example .env
 | `CKL_PAGE_LOAD_TIMEOUT` | Page load timeout (sec) | `30` |
 | `CKL_IMPLICIT_WAIT` | Implicit wait (sec) | `10` |
 | `CKL_REQUEST_DELAY` | Delay between questions (sec) | `1.0` |
+| `WA_USERNAME` | West Academic email | (for `--site westacademic`) |
+| `WA_PASSWORD` | West Academic password | (for `--site westacademic`) |
+| `WA_BASE_URL` | West Academic base URL | `https://subscription.westacademic.com` |
+| `WA_LOGIN_METHOD` | Login method: `form` or `google` | `form` |
 
 ## Usage
 
@@ -57,6 +61,12 @@ python main.py --dry-run
 
 # Save log output to a file
 python main.py --log-file scrape.log
+
+# Scrape West Academic quizzes (email/password login)
+python main.py --site westacademic
+
+# Scrape West Academic quizzes (Google login)
+WA_LOGIN_METHOD=google python main.py --site westacademic
 ```
 
 ### CLI Options
@@ -155,7 +165,7 @@ Run the test suite with pytest:
 pytest tests/ -v
 ```
 
-Tests cover all 8 export formats, adaptive delay behavior, and the site plugin system (70 tests total).
+Tests cover all 8 export formats, adaptive delay behavior, site plugins, and Google auth (89 tests total).
 
 ## Project Structure
 
@@ -167,9 +177,11 @@ ckl-quiz-scraper/
 │   ├── browser.py                   # WebDriver, login, diagnostics, cookies
 │   ├── quiz_scraper.py              # Adaptive delay, progress tracking, helpers
 │   ├── base.py                      # BaseScraper ABC (plugin interface)
+│   ├── google_auth.py               # Google OAuth login handler
 │   ├── sites/
 │   │   ├── __init__.py              # Site plugin registry
 │   │   ├── ckl.py                   # CKL site implementation
+│   │   ├── westacademic.py          # West Academic site implementation
 │   │   └── example_site.py          # Template for adding new sites
 │   └── exporters/
 │       ├── __init__.py              # Export dispatcher

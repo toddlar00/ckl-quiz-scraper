@@ -5,10 +5,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Credentials
+# CKL Credentials
 USERNAME = os.getenv("CKL_USERNAME", "")
 PASSWORD = os.getenv("CKL_PASSWORD", "")
 BASE_URL = os.getenv("CKL_BASE_URL", "https://coreknowledgeforlawyers.com")
+
+# West Academic Credentials
+WA_USERNAME = os.getenv("WA_USERNAME", "")
+WA_PASSWORD = os.getenv("WA_PASSWORD", "")
+WA_BASE_URL = os.getenv("WA_BASE_URL", "https://subscription.westacademic.com")
+WA_LOGIN_METHOD = os.getenv("WA_LOGIN_METHOD", "form")  # "form" or "google"
 
 # Selenium settings
 HEADLESS = os.getenv("CKL_HEADLESS", "true").lower() == "true"
