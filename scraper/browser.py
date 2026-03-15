@@ -40,7 +40,8 @@ def create_driver():
 def login(driver):
     """Log into the CKL website using configured credentials.
 
-    Attempts multiple common login page patterns to find the login form.
+    The CKL site has the login form directly on the homepage with
+    Email and Password fields and a "Log In" button.
     Returns True if login appears successful, False otherwise.
     """
     if not config.USERNAME or not config.PASSWORD:
@@ -49,26 +50,14 @@ def login(driver):
         )
 
     base = config.BASE_URL.rstrip("/")
-    login_paths = [
-        "/login",
-        "/log-in",
-        "/signin",
-        "/sign-in",
-        "/wp-login.php",
-        "/my-account",
-        "/account/login",
-    ]
 
+    # CKL login form is on the homepage
     driver.get(base)
-    time.sleep(2)
+    time.sleep(3)
 
-    # Check if there's a login link on the homepage
-    login_url = _find_login_link(driver, base)
-    if login_url:
-        driver.get(login_url)
-        time.sleep(2)
-    else:
-        # Try common login paths
+    if not _has_login_form(driver):
+        # Fallback: try common login paths
+        login_paths = ["/login", "/log-in", "/signin", "/wp-login.php"]
         for path in login_paths:
             try:
                 driver.get(base + path)
@@ -118,7 +107,10 @@ def _has_login_form(driver):
 
 
 def _submit_login(driver):
-    """Find and fill the login form, then submit it."""
+    """Find and fill the CKL login form, then submit it.
+
+    CKL homepage has: Email input, Password input, and a "Log In" button.
+    """
     wait = WebDriverWait(driver, 10)
 
     try:
@@ -129,53 +121,37 @@ def _submit_login(driver):
             )
         )
 
-        # Find the username/email field - look for text/email input before the password field
-        username_field = None
+        # Find the email field — CKL uses an email input on the homepage
+        email_field = None
         selectors = [
             "input[type='email']",
-            "input[name='username']",
             "input[name='email']",
+            "input[name='Email']",
+            "input[name='username']",
             "input[name='log']",
-            "input[name='user_login']",
-            "input[name='login_email']",
             "input[type='text']",
         ]
         for selector in selectors:
             fields = driver.find_elements(By.CSS_SELECTOR, selector)
             for field in fields:
                 if field.is_displayed():
-                    username_field = field
+                    email_field = field
                     break
-            if username_field:
+            if email_field:
                 break
 
-        if not username_field:
-            logger.error("Could not find username/email input field")
+        if not email_field:
+            logger.error("Could not find email input field")
             return False
 
         # Fill in credentials
-        username_field.clear()
-        username_field.send_keys(config.USERNAME)
+        email_field.clear()
+        email_field.send_keys(config.USERNAME)
         password_field.clear()
         password_field.send_keys(config.PASSWORD)
 
-        # Find and click submit button
-        submit_btn = None
-        btn_selectors = [
-            "button[type='submit']",
-            "input[type='submit']",
-            "button.login-btn",
-            "button.signin-btn",
-            "#login-btn",
-        ]
-        for selector in btn_selectors:
-            btns = driver.find_elements(By.CSS_SELECTOR, selector)
-            for btn in btns:
-                if btn.is_displayed():
-                    submit_btn = btn
-                    break
-            if submit_btn:
-                break
+        # Find and click the "Log In" button
+        submit_btn = _find_login_button(driver)
 
         if not submit_btn:
             # Fallback: submit the form directly
@@ -184,23 +160,57 @@ def _submit_login(driver):
         else:
             submit_btn.click()
 
-        time.sleep(3)
+        time.sleep(4)
 
-        # Verify login success - check we're no longer on a login page
-        current_url = driver.current_url.lower()
-        if "login" in current_url or "signin" in current_url:
-            # Check for error messages
-            error_selectors = [".error", ".alert-danger", ".login-error", "#login-error"]
-            for selector in error_selectors:
-                errors = driver.find_elements(By.CSS_SELECTOR, selector)
-                for err in errors:
-                    if err.is_displayed() and err.text.strip():
-                        logger.error("Login failed: %s", err.text.strip())
-                        return False
+        # Verify login success — check page changed or has post-login content
+        page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        current_url = driver.current_url
 
-        logger.info("Login successful. Current URL: %s", driver.current_url)
+        # Check for error messages on page
+        error_indicators = [
+            "invalid email", "invalid password", "incorrect password",
+            "login failed", "authentication failed", "wrong password",
+        ]
+        for indicator in error_indicators:
+            if indicator in page_text:
+                logger.error("Login failed: found '%s' on page", indicator)
+                return False
+
+        # If we can still see "Registered Users Log In Here", login may have failed
+        if "registered users log in here" in page_text:
+            logger.warning("Login form still visible — login may have failed")
+            return False
+
+        logger.info("Login successful. Current URL: %s", current_url)
         return True
 
     except Exception as e:
         logger.error("Login failed with error: %s", e)
         return False
+
+
+def _find_login_button(driver):
+    """Find the Log In / Submit button."""
+    # Try standard submit buttons first
+    btn_selectors = [
+        "input[type='submit']",
+        "button[type='submit']",
+    ]
+    for selector in btn_selectors:
+        btns = driver.find_elements(By.CSS_SELECTOR, selector)
+        for btn in btns:
+            if btn.is_displayed():
+                return btn
+
+    # Search by button text — CKL uses "Log In"
+    login_texts = ["log in", "login", "sign in", "submit"]
+    try:
+        buttons = driver.find_elements(By.CSS_SELECTOR, "button, input[type='button'], a.btn")
+        for btn in buttons:
+            btn_text = (btn.text or btn.get_attribute("value") or "").strip().lower()
+            if btn_text in login_texts and btn.is_displayed():
+                return btn
+    except Exception:
+        pass
+
+    return None
