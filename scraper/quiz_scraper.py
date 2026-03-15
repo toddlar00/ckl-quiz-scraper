@@ -34,6 +34,153 @@ from scraper import config
 logger = logging.getLogger(__name__)
 
 PROGRESS_FILE = ".ckl_progress.json"
+ADAPTIVE_DELAY_FILE = ".ckl_adaptive_delay.json"
+
+# Default total sleep budget per question (sum of all original hardcoded sleeps).
+# Original: 1s (pre-submit) + 2s (post-submit) + 2s (feedback wait) + 3s (next click) + 1s (rate limit) = 9s
+DEFAULT_DELAY_BUDGET = 9.0
+
+# Proportional distribution of the delay budget across sleep points.
+# These fractions sum to 1.0 and represent where time is spent per question.
+DELAY_FRACTIONS = {
+    "pre_submit": 0.11,    # After selecting radio, before clicking Submit (orig 1s)
+    "post_submit": 0.22,   # After clicking Submit, waiting for feedback (orig 2s)
+    "feedback_wait": 0.22, # After submit_answer returns, before reading feedback (orig 2s)
+    "next_click": 0.34,    # After clicking Next Question, waiting for page (orig 3s)
+    "rate_limit": 0.11,    # Between questions rate limit (orig 1s)
+}
+
+
+# ---------------------------------------------------------------------------
+# Adaptive delay manager
+# ---------------------------------------------------------------------------
+
+class AdaptiveDelay:
+    """Finds the minimum viable delay by decreasing on success and increasing on failure.
+
+    Strategy:
+      - Start with a total delay budget (seconds per question).
+      - Each successful question: reduce budget by 1 second.
+      - Each failure (timeout, parse error): increase budget by 1 second.
+      - Individual sleep points get proportional fractions of the total budget.
+      - The learned delay is saved to disk and reloaded on next run.
+    """
+
+    def __init__(self, initial_budget=None):
+        self._budget = initial_budget or DEFAULT_DELAY_BUDGET
+        self._min_budget = 0.0
+        self._max_budget = 30.0
+        self._consecutive_successes = 0
+        self._consecutive_failures = 0
+        self._total_adjustments = 0
+        self._load()
+        logger.info(
+            "Adaptive delay: starting budget = %.1fs per question "
+            "(sleeps: pre_submit=%.1fs, post_submit=%.1fs, feedback=%.1fs, "
+            "next=%.1fs, rate_limit=%.1fs)",
+            self._budget,
+            self.get("pre_submit"), self.get("post_submit"),
+            self.get("feedback_wait"), self.get("next_click"),
+            self.get("rate_limit"),
+        )
+
+    @property
+    def budget(self):
+        return self._budget
+
+    def get(self, sleep_point):
+        """Get the delay in seconds for a named sleep point."""
+        fraction = DELAY_FRACTIONS.get(sleep_point, 0.1)
+        return max(0.0, self._budget * fraction)
+
+    def sleep(self, sleep_point):
+        """Sleep for the adaptive duration of the named sleep point."""
+        duration = self.get(sleep_point)
+        if duration > 0:
+            time.sleep(duration)
+
+    def on_success(self):
+        """Called after a question is successfully scraped."""
+        self._consecutive_successes += 1
+        self._consecutive_failures = 0
+        old = self._budget
+        if self._budget > self._min_budget:
+            self._budget = max(self._min_budget, self._budget - 1.0)
+            self._total_adjustments += 1
+        if old != self._budget:
+            logger.info(
+                "  Adaptive delay: success → reduced %.1fs → %.1fs",
+                old, self._budget,
+            )
+        self._save()
+
+    def on_failure(self):
+        """Called after a question fails to scrape (timeout, parse error)."""
+        self._consecutive_failures += 1
+        self._consecutive_successes = 0
+        old = self._budget
+        if self._budget < self._max_budget:
+            self._budget = min(self._max_budget, self._budget + 1.0)
+            self._total_adjustments += 1
+        logger.info(
+            "  Adaptive delay: failure → increased %.1fs → %.1fs",
+            old, self._budget,
+        )
+        self._save()
+
+    def summary(self):
+        """Return a summary dict for logging."""
+        return {
+            "current_budget": self._budget,
+            "total_adjustments": self._total_adjustments,
+            "consecutive_successes": self._consecutive_successes,
+        }
+
+    def _load(self):
+        """Load saved delay from disk."""
+        if not os.path.exists(ADAPTIVE_DELAY_FILE):
+            return
+        try:
+            with open(ADAPTIVE_DELAY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved = data.get("budget")
+            if saved is not None and isinstance(saved, (int, float)):
+                self._budget = max(self._min_budget, min(self._max_budget, float(saved)))
+                logger.info("Loaded saved adaptive delay: %.1fs", self._budget)
+        except Exception as e:
+            logger.debug("Could not load adaptive delay: %s", e)
+
+    def _save(self):
+        """Save current delay to disk."""
+        try:
+            data = {
+                "budget": self._budget,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with open(ADAPTIVE_DELAY_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.debug("Could not save adaptive delay: %s", e)
+
+
+# The global adaptive delay instance, initialized lazily.
+_adaptive_delay = None
+
+
+def get_adaptive_delay():
+    """Get or create the global AdaptiveDelay instance."""
+    global _adaptive_delay
+    if _adaptive_delay is None:
+        _adaptive_delay = AdaptiveDelay()
+    return _adaptive_delay
+
+
+def reset_adaptive_delay():
+    """Reset the adaptive delay to defaults (for --fresh mode)."""
+    global _adaptive_delay
+    _adaptive_delay = AdaptiveDelay(initial_budget=DEFAULT_DELAY_BUDGET)
+    if os.path.exists(ADAPTIVE_DELAY_FILE):
+        os.remove(ADAPTIVE_DELAY_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -384,20 +531,25 @@ def scrape_chapter_questions(driver, chapter, resume=True):
     while question_num < max_questions:
         question_num += 1
 
+        adaptive = get_adaptive_delay()
+
         try:
             q = _scrape_single_question(driver, question_num, total or 0)
             if q:
                 questions.append(q)
                 consecutive_failures = 0
+                adaptive.on_success()
                 logger.info(
-                    "  [%d/%s] %s → Answer: %s",
+                    "  [%d/%s] %s → Answer: %s (delay: %.1fs)",
                     q.question_number,
                     total or "?",
-                    q.question_text[:70] + ("..." if len(q.question_text) > 70 else ""),
+                    q.question_text[:60] + ("..." if len(q.question_text) > 60 else ""),
                     q.correct_answer or "unknown",
+                    adaptive.budget,
                 )
             else:
                 consecutive_failures += 1
+                adaptive.on_failure()
                 logger.warning("  Could not parse question %d", question_num)
                 from scraper.browser import diagnose_page
                 diagnose_page(driver, f"parse_fail_q{question_num}")
@@ -417,11 +569,19 @@ def scrape_chapter_questions(driver, chapter, resume=True):
                 logger.info("  Finished chapter (%d questions scraped)", len(questions))
                 break
 
-            # Rate limiting — small pause between questions
-            time.sleep(config.REQUEST_DELAY)
+            # Adaptive rate limiting between questions
+            adaptive.sleep("rate_limit")
+
+        except (TimeoutException, WebDriverException) as e:
+            consecutive_failures += 1
+            adaptive.on_failure()
+            logger.warning("  Timeout/error on question %d (increasing delay): %s", question_num, e)
+            if not _click_next_question(driver):
+                break
 
         except Exception as e:
             consecutive_failures += 1
+            adaptive.on_failure()
             logger.warning("  Error on question %d: %s", question_num, e)
             if not _click_next_question(driver):
                 break
@@ -467,7 +627,7 @@ def _scrape_single_question(driver, question_num, total):
 
     # Submit answer to reveal correct answer + explanation
     _submit_answer(driver)
-    time.sleep(2)
+    get_adaptive_delay().sleep("feedback_wait")
 
     # Read feedback
     correct_answer, explanation = _extract_feedback(driver)
@@ -637,13 +797,13 @@ def _submit_answer(driver):
                 _safe_click(driver, radio, "radio button")
                 break
 
-        time.sleep(1)
+        get_adaptive_delay().sleep("pre_submit")
 
         # Find Submit button
         submit_btn = _find_button(driver, ["submit"])
         if submit_btn:
             _safe_click(driver, submit_btn, "Submit button")
-            time.sleep(2)
+            get_adaptive_delay().sleep("post_submit")
         else:
             logger.warning("  Could not find Submit button")
             from scraper.browser import diagnose_page
@@ -724,7 +884,7 @@ def _click_next_question(driver):
             next_link = driver.find_element(By.PARTIAL_LINK_TEXT, "Next Question")
             if next_link.is_displayed():
                 _safe_click(driver, next_link, "Next Question")
-                time.sleep(3)
+                get_adaptive_delay().sleep("next_click")
                 return True
         except NoSuchElementException:
             pass
@@ -736,7 +896,7 @@ def _click_next_question(driver):
             )
             if next_el.is_displayed():
                 _safe_click(driver, next_el, "Next Question")
-                time.sleep(3)
+                get_adaptive_delay().sleep("next_click")
                 return True
         except NoSuchElementException:
             pass
@@ -747,7 +907,7 @@ def _click_next_question(driver):
                 text = (el.text or el.get_attribute("value") or "").strip()
                 if "next question" in text.lower() and el.is_displayed():
                     _safe_click(driver, el, "Next Question")
-                    time.sleep(3)
+                    get_adaptive_delay().sleep("next_click")
                     return True
             except StaleElementReferenceException:
                 continue

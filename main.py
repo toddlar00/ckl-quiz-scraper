@@ -20,6 +20,8 @@ from scraper.quiz_scraper import (
     clear_progress,
     discover_chapters,
     discover_practice_sets,
+    get_adaptive_delay,
+    reset_adaptive_delay,
     scrape_chapter_questions,
 )
 
@@ -126,7 +128,7 @@ examples:
         "--delay",
         type=float,
         default=None,
-        help="Delay in seconds between questions (default: 1.0)",
+        help="Fixed delay in seconds between questions (disables adaptive mode)",
     )
     behavior.add_argument(
         "--verbose", "-v",
@@ -155,8 +157,18 @@ examples:
         cfg.HEADLESS = False
     if args.delay is not None:
         cfg.REQUEST_DELAY = args.delay
+        # Fixed delay mode: set the adaptive delay to a fixed budget
+        # based on the user's specified delay (scaled up to full budget)
+        from scraper.quiz_scraper import AdaptiveDelay, _adaptive_delay
+        import scraper.quiz_scraper as qs
+        fixed = AdaptiveDelay(initial_budget=args.delay * 9.0)
+        # Override on_success/on_failure to be no-ops (fixed mode)
+        fixed.on_success = lambda: None
+        fixed.on_failure = lambda: None
+        qs._adaptive_delay = fixed
     if args.fresh:
         clear_progress()
+        reset_adaptive_delay()
 
     driver = None
     start_time = time.time()
@@ -345,6 +357,9 @@ examples:
             logger.info("  Question types:")
             for qt, count in sorted(question_types.items(), key=lambda x: -x[1]):
                 logger.info("    %-25s %d", qt, count)
+        adaptive_info = get_adaptive_delay().summary()
+        logger.info("  Adaptive delay:    %.1fs (after %d adjustments)",
+                     adaptive_info["current_budget"], adaptive_info["total_adjustments"])
         logger.info("  Per practice set:")
         for ps in all_practice_sets:
             ps_q = sum(len(ch.questions) for ch in ps.chapters)
