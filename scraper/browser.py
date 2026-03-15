@@ -183,6 +183,7 @@ def login(driver):
             time.sleep(3)
             if is_logged_in(driver):
                 logger.info("Cookie login successful!")
+                _navigate_to_home(driver)
                 return True
             logger.info("Cookie login failed, falling back to form login")
 
@@ -301,11 +302,48 @@ def _submit_login(driver):
             return False
 
         logger.info("Login successful. URL: %s", driver.current_url)
+
+        # After login, the site may redirect to a tutorial/welcome page.
+        # Navigate back to home to ensure we land on the practice sets grid.
+        _navigate_to_home(driver)
+
         return True
 
     except Exception as e:
         logger.error("Login failed: %s", e)
         return False
+
+
+def _navigate_to_home(driver):
+    """Ensure we are on the home page (practice sets grid), not a tutorial page.
+
+    After login, CKL may redirect to the 'Welcome to CKL' tutorial or another
+    practice set page. This checks and clicks the HOME link if needed.
+    """
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        # Detect if we landed on a tutorial/practice set page instead of home
+        on_tutorial = "Page" in body_text and " of " in body_text
+        on_welcome = "Welcome to CKL" in body_text and "Getting Started" in body_text
+        # Home page has the book cover grid with "Click the book image to launch"
+        on_home = "click the book image" in body_text.lower()
+
+        if (on_tutorial or on_welcome) and not on_home:
+            logger.info("Detected tutorial/welcome page, navigating to HOME...")
+            # Click the HOME link in the top nav bar
+            try:
+                home_link = driver.find_element(By.LINK_TEXT, "HOME")
+                home_link.click()
+                time.sleep(3)
+                logger.info("Navigated to home page. URL: %s", driver.current_url)
+            except Exception:
+                # Fallback: navigate to base URL directly
+                base = config.BASE_URL.rstrip("/")
+                driver.get(base)
+                time.sleep(3)
+                logger.info("Navigated to base URL. URL: %s", driver.current_url)
+    except Exception as e:
+        logger.debug("Home navigation check failed: %s", e)
 
 
 def _find_login_button(driver):

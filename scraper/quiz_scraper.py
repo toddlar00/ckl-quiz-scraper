@@ -182,6 +182,18 @@ def discover_practice_sets(driver):
     base = config.BASE_URL.rstrip("/")
     _safe_get(driver, base, "home page")
 
+    # If we landed on a tutorial/welcome page instead of the home grid,
+    # click the HOME nav link to get to the practice sets grid.
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        if "Getting Started" in body_text and "Page" in body_text and "of" in body_text:
+            logger.info("Detected tutorial page, clicking HOME link...")
+            home_link = driver.find_element(By.LINK_TEXT, "HOME")
+            home_link.click()
+            time.sleep(3)
+    except Exception:
+        pass
+
     practice_sets = []
 
     try:
@@ -204,6 +216,8 @@ def discover_practice_sets(driver):
                     "help", "my account", "log out", "support",
                     "forgot", "create", "carolina academic",
                     "faculty", "archived", "expired",
+                    "welcome to ckl", "getting started",
+                    "show", "search",
                 ]
                 if any(s in text for s in skip_texts):
                     continue
@@ -212,6 +226,17 @@ def discover_practice_sets(driver):
 
                 title = link.text.strip()
                 if not title:
+                    # Try image alt text (book covers are often img links)
+                    try:
+                        imgs = link.find_elements(By.TAG_NAME, "img")
+                        for img in imgs:
+                            alt = (img.get_attribute("alt") or "").strip()
+                            if alt:
+                                title = alt
+                                break
+                    except Exception:
+                        pass
+                if not title:
                     try:
                         parent = link.find_element(By.XPATH, "./..")
                         title = parent.text.strip()
@@ -219,6 +244,10 @@ def discover_practice_sets(driver):
                         title = href
 
                 if title and href != base + "/" and href != base:
+                    # Also filter title after extraction (img alt, parent text)
+                    title_lower = title.lower()
+                    if any(s in title_lower for s in skip_texts):
+                        continue
                     seen_urls.add(href)
                     practice_sets.append((title, href))
 
