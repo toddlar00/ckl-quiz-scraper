@@ -32,6 +32,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from scraper import config
+from scraper.shutdown import shutdown_requested
 
 # Re-export from new modules for backward compatibility
 from scraper.models import QuizQuestion, Chapter, PracticeSet, validate_practice_sets  # noqa: F401
@@ -406,6 +407,17 @@ def scrape_chapter_questions(driver, chapter, resume=True):
     consecutive_failures = 0
 
     while question_num < max_questions:
+        # Check for graceful shutdown between questions
+        if shutdown_requested():
+            logger.info("  Shutdown requested — saving progress (%d questions scraped)", len(questions))
+            from dataclasses import asdict
+            save_chapter_checkpoint(
+                chapter.launch_url,
+                len(questions),
+                [asdict(q) for q in questions],
+            )
+            break
+
         question_num += 1
 
         adaptive = get_adaptive_delay()
@@ -472,7 +484,8 @@ def scrape_chapter_questions(driver, chapter, resume=True):
                 break
 
     chapter.questions = questions
-    mark_chapter_completed(chapter.launch_url, len(questions))
+    if not shutdown_requested():
+        mark_chapter_completed(chapter.launch_url, len(questions))
     return questions
 
 

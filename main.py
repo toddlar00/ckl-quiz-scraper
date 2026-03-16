@@ -17,6 +17,7 @@ from scraper.exporters import ALL_FORMATS, export_all
 from scraper.models import Chapter, PracticeSet, validate_practice_sets
 from scraper.adaptive_delay import AdaptiveDelay, get_adaptive_delay, reset_adaptive_delay
 from scraper.progress import clear_progress
+from scraper.shutdown import install_signal_handlers, shutdown_requested
 from scraper.quiz_scraper import (
     discover_chapters,
     discover_practice_sets,
@@ -179,7 +180,12 @@ examples:
         reset_adaptive_delay()
 
     driver = None
+    all_practice_sets = []
     start_time = time.time()
+
+    # Install graceful shutdown handlers (Ctrl+C saves progress + exports partial data)
+    install_signal_handlers()
+
     try:
         scraper_cls = SITE_SCRAPERS[args.site]
         logger.info("Starting %s scraper...", scraper_cls.SITE_NAME)
@@ -211,8 +217,6 @@ examples:
                 )
                 sys.exit(1)
             logger.info("Login successful!")
-
-        all_practice_sets = []
 
         # Direct chapter URL mode
         if args.chapter_url:
@@ -301,6 +305,9 @@ examples:
                         logger.info("  - %s [%s]", ch.chapter_name, ch.status)
                 else:
                     for i, chapter in enumerate(chapters, 1):
+                        if shutdown_requested():
+                            logger.info("Shutdown requested — stopping after current practice set")
+                            break
                         logger.info(
                             "----- Chapter %d/%d: %s -----",
                             i, len(chapters), chapter.chapter_name,
@@ -312,6 +319,8 @@ examples:
                         )
 
                 all_practice_sets.append(ps)
+                if shutdown_requested():
+                    break
 
             if args.dry_run:
                 total_chapters = sum(len(ps.chapters) for ps in all_practice_sets)
@@ -407,8 +416,24 @@ examples:
             logger.info("  %-12s %s (%s)", fmt + ":", path, size_str)
 
     except KeyboardInterrupt:
-        logger.info("\nInterrupted by user. Progress has been saved.")
-        logger.info("Run again to resume from where you left off.")
+        logger.info("\nInterrupted by user.")
+        # Export whatever data was collected before exiting
+        total_questions = sum(
+            len(ch.questions)
+            for ps in all_practice_sets
+            for ch in ps.chapters
+        )
+        if total_questions > 0:
+            logger.info("Exporting %d question(s) collected so far...", total_questions)
+            try:
+                formats = args.format
+                paths = export_all(all_practice_sets, args.output_dir, formats)
+                logger.info("Partial export complete! Files saved:")
+                for fmt, path in paths.items():
+                    logger.info("  %-12s %s", fmt + ":", path)
+            except Exception as ex:
+                logger.warning("Could not export partial results: %s", ex)
+        logger.info("Progress has been saved. Run again to resume from where you left off.")
         sys.exit(130)
     except Exception as e:
         logger.error("Fatal error: %s", e, exc_info=True)

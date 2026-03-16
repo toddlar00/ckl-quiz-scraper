@@ -13,6 +13,7 @@ from dataclasses import asdict
 
 from scraper.models import Chapter, PracticeSet, QuizQuestion
 from scraper.adaptive_delay import get_adaptive_delay
+from scraper.shutdown import shutdown_requested
 from scraper.progress import (
     is_chapter_completed,
     load_chapter_checkpoint,
@@ -207,6 +208,16 @@ class BaseScraper(ABC):
         consecutive_failures = 0
 
         while question_num < max_questions:
+            # Check for graceful shutdown between questions
+            if shutdown_requested():
+                logger.info("  Shutdown requested — saving progress (%d questions scraped)", len(questions))
+                save_chapter_checkpoint(
+                    chapter.launch_url,
+                    len(questions),
+                    [asdict(q) for q in questions],
+                )
+                break
+
             question_num += 1
             adaptive = get_adaptive_delay()
 
@@ -272,7 +283,8 @@ class BaseScraper(ABC):
                     break
 
         chapter.questions = questions
-        mark_chapter_completed(chapter.launch_url, len(questions))
+        if not shutdown_requested():
+            mark_chapter_completed(chapter.launch_url, len(questions))
         return questions
 
     def _scrape_single_question(self, question_num, total):
