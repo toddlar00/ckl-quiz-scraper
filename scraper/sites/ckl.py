@@ -38,16 +38,104 @@ class CKLScraper(BaseScraper):
         return browser_login(self.driver)
 
     def navigate_to_home(self):
-        """Handle CKL's post-login redirect to tutorial page."""
+        """Handle CKL's post-login redirect to tutorial/welcome page.
+
+        After login, CKL may redirect to the 'Welcome to CKL' tutorial
+        (shows 'Page X of Y', 'Getting Started', or 'Accessing Practice Sets').
+        This clicks HOME to get back to the practice sets grid.
+        """
         try:
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
-            if "Getting Started" in body_text and "Page" in body_text:
-                logger.info("Detected tutorial page, clicking HOME link...")
-                home_link = self.driver.find_element(By.LINK_TEXT, "HOME")
-                home_link.click()
-                time.sleep(3)
-        except Exception:
-            pass
+            # Detect tutorial/welcome page indicators
+            is_tutorial = (
+                ("Getting Started" in body_text and "Page" in body_text)
+                or "Accessing Practice Sets" in body_text
+                or ("Welcome to CKL" in body_text and "Page" in body_text)
+                or "Page 1 of" in body_text
+                or "Page 2 of" in body_text
+            )
+            # Already on home page?
+            is_home = "click the book image" in body_text.lower()
+
+            if is_tutorial and not is_home:
+                logger.info("Detected tutorial/welcome page, navigating to HOME...")
+                try:
+                    home_link = self.driver.find_element(By.LINK_TEXT, "HOME")
+                    _safe_click(self.driver, home_link, "HOME link")
+                    time.sleep(3)
+                    logger.info("Navigated to home page. URL: %s", self.driver.current_url)
+                except NoSuchElementException:
+                    # Fallback: navigate directly to base URL
+                    from scraper.quiz_scraper import _safe_get
+                    _safe_get(self.driver, config.BASE_URL.rstrip("/"), "home page")
+        except Exception as e:
+            logger.debug("Home navigation check failed: %s", e)
+
+    def prepare_chapter(self):
+        """Handle CKL's chapter preamble page.
+
+        After launching a chapter, CKL shows an intro page with:
+          - Chapter title and description text
+          - "Continue to Questions" button (must click to reach actual questions)
+          - "Back to Practice Set" link
+
+        This detects the preamble and clicks through to the questions.
+        """
+        try:
+            body_text = self.driver.find_element(By.TAG_NAME, "body").text
+
+            # Check if we're on a preamble page (has "Continue to Questions" button)
+            if "Continue to Questions" not in body_text:
+                return  # Already on a question page
+
+            logger.info("  Detected chapter preamble page, clicking 'Continue to Questions'...")
+
+            # Try finding the button/link by multiple strategies
+            continue_btn = None
+
+            # Strategy 1: Link text match
+            try:
+                continue_btn = self.driver.find_element(
+                    By.PARTIAL_LINK_TEXT, "Continue to Questions"
+                )
+            except NoSuchElementException:
+                pass
+
+            # Strategy 2: XPath for any element containing the text
+            if not continue_btn:
+                try:
+                    continue_btn = self.driver.find_element(
+                        By.XPATH, "//*[contains(text(), 'Continue to Questions')]"
+                    )
+                except NoSuchElementException:
+                    pass
+
+            # Strategy 3: Button/link text search
+            if not continue_btn:
+                for el in self.driver.find_elements(By.CSS_SELECTOR, "a, button, input"):
+                    try:
+                        text = (el.text or el.get_attribute("value") or "").strip()
+                        if "continue to questions" in text.lower():
+                            if el.is_displayed():
+                                continue_btn = el
+                                break
+                    except StaleElementReferenceException:
+                        continue
+
+            if continue_btn and continue_btn.is_displayed():
+                _safe_click(self.driver, continue_btn, "Continue to Questions")
+                get_adaptive_delay().sleep("next_click")
+                logger.info("  Clicked 'Continue to Questions', now on question page")
+            else:
+                logger.warning(
+                    "  'Continue to Questions' text found but button not clickable. "
+                    "URL: %s", self.driver.current_url,
+                )
+                from scraper.browser import diagnose_page
+                diagnose_page(self.driver, "continue_to_questions_not_found")
+
+        except Exception as e:
+            logger.debug("Chapter preamble handling: %s", e)
 
     def discover_practice_sets(self):
         base = config.BASE_URL.rstrip("/")

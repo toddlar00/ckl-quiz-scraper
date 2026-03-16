@@ -329,6 +329,52 @@ def discover_chapters(driver, practice_set_url):
 # Question scraping
 # ---------------------------------------------------------------------------
 
+def _handle_chapter_preamble(driver):
+    """Handle chapter preamble/intro pages that appear before questions.
+
+    CKL (and potentially other sites) shows an introductory page after
+    launching a chapter, with a "Continue to Questions" button that must
+    be clicked to reach the actual quiz questions.
+    """
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        if "Continue to Questions" not in body_text:
+            return  # No preamble, already on question page
+
+        logger.info("  Detected chapter preamble, clicking 'Continue to Questions'...")
+
+        # Try multiple strategies to find the button
+        for strategy in [
+            lambda: driver.find_element(By.PARTIAL_LINK_TEXT, "Continue to Questions"),
+            lambda: driver.find_element(By.XPATH, "//*[contains(text(), 'Continue to Questions')]"),
+        ]:
+            try:
+                btn = strategy()
+                if btn.is_displayed():
+                    _safe_click(driver, btn, "Continue to Questions")
+                    get_adaptive_delay().sleep("next_click")
+                    logger.info("  Clicked 'Continue to Questions'")
+                    return
+            except NoSuchElementException:
+                continue
+
+        # Broad search across all clickable elements
+        for el in driver.find_elements(By.CSS_SELECTOR, "a, button, input"):
+            try:
+                text = (el.text or el.get_attribute("value") or "").strip()
+                if "continue to questions" in text.lower() and el.is_displayed():
+                    _safe_click(driver, el, "Continue to Questions")
+                    get_adaptive_delay().sleep("next_click")
+                    logger.info("  Clicked 'Continue to Questions'")
+                    return
+            except StaleElementReferenceException:
+                continue
+
+        logger.warning("  'Continue to Questions' text found but button not clickable")
+    except Exception as e:
+        logger.debug("Chapter preamble handling: %s", e)
+
+
 def scrape_chapter_questions(driver, chapter, resume=True):
     """Scrape all questions from a chapter by launching it and iterating.
 
@@ -346,6 +392,9 @@ def scrape_chapter_questions(driver, chapter, resume=True):
         return chapter.questions
 
     _safe_get(driver, chapter.launch_url, f"chapter: {chapter.chapter_name}")
+
+    # Handle chapter preamble pages (e.g. "Continue to Questions" on CKL)
+    _handle_chapter_preamble(driver)
 
     questions = []
 

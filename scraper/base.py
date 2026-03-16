@@ -149,6 +149,17 @@ class BaseScraper(ABC):
         """Navigate to the home/dashboard page after login. Override if needed."""
         pass
 
+    def prepare_chapter(self):
+        """Handle chapter preamble/intro pages before questions begin.
+
+        Some sites show an introductory page after launching a chapter,
+        requiring a button click (e.g. "Continue to Questions") to reach
+        the actual quiz. Override this to handle site-specific preambles.
+
+        Called after navigating to the chapter URL, before the question loop.
+        """
+        pass
+
     # ------------------------------------------------------------------
     # Framework methods — shared across all scrapers
     # ------------------------------------------------------------------
@@ -173,6 +184,9 @@ class BaseScraper(ABC):
         checkpoint_offset, checkpoint_data = load_chapter_checkpoint(chapter.launch_url)
 
         _safe_get(self.driver, chapter.launch_url, f"chapter: {chapter.chapter_name}")
+
+        # Handle chapter preamble/intro pages (e.g. "Continue to Questions")
+        self.prepare_chapter()
 
         initial_body = _get_body_text(self.driver)
         total = self.get_total_questions(initial_body)
