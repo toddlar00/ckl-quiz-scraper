@@ -21,6 +21,48 @@ from scraper import config
 logger = logging.getLogger(__name__)
 
 COOKIES_FILE = ".ckl_cookies.json"
+
+
+def _add_proxy_auth_extension(options, parsed_url):
+    """Create a temporary Chrome extension that handles proxy authentication.
+
+    Chrome's --proxy-server flag doesn't support user:pass in the URL.
+    This injects a minimal extension that responds to proxy auth challenges.
+    """
+    import tempfile
+    import zipfile
+
+    manifest = """{
+        "version": "1.0.0",
+        "manifest_version": 2,
+        "name": "Proxy Auth",
+        "permissions": ["proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+        "background": {"scripts": ["background.js"]}
+    }"""
+
+    background = """
+    chrome.webRequest.onAuthRequired.addListener(
+        function(details) {
+            return {
+                authCredentials: {
+                    username: "%s",
+                    password: "%s"
+                }
+            };
+        },
+        {urls: ["<all_urls>"]},
+        ["blocking"]
+    );
+    """ % (parsed_url.username.replace('"', '\\"'),
+           parsed_url.password.replace('"', '\\"'))
+
+    ext_path = tempfile.mktemp(suffix=".zip")
+    with zipfile.ZipFile(ext_path, "w") as zf:
+        zf.writestr("manifest.json", manifest)
+        zf.writestr("background.js", background)
+
+    options.add_extension(ext_path)
+    logger.debug("Added proxy auth extension for user: %s", parsed_url.username)
 SCREENSHOT_DIR = "debug_screenshots"
 
 
@@ -111,6 +153,27 @@ def create_driver():
     options.add_argument("--disable-webrtc")
     # Accept language header for consistency
     options.add_argument("--lang=en-US")
+
+    # --- Proxy support ---
+    if config.PROXY_URL:
+        proxy_url = config.PROXY_URL
+        # Chrome's --proxy-server flag doesn't support embedded credentials.
+        # For authenticated proxies, extract credentials and use an extension.
+        from urllib.parse import urlparse
+        parsed = urlparse(proxy_url)
+        if parsed.username:
+            # Authenticated proxy — install a tiny Chrome extension that
+            # supplies credentials via the chrome.webRequest.onAuthRequired API.
+            _add_proxy_auth_extension(options, parsed)
+            # Build a URL without credentials for --proxy-server
+            host_port = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+            scheme = parsed.scheme.replace("socks5", "socks5")  # passthrough
+            proxy_url = f"{scheme}://{host_port}"
+
+        options.add_argument(f"--proxy-server={proxy_url}")
+        # Bypass proxy for localhost traffic
+        options.add_argument("--proxy-bypass-list=localhost;127.0.0.1")
+        logger.info("Using proxy: %s", proxy_url)
 
     try:
         service = Service(ChromeDriverManager().install())
