@@ -333,47 +333,77 @@ def discover_chapters(driver, practice_set_url):
 def _handle_chapter_preamble(driver):
     """Handle chapter preamble/intro pages that appear before questions.
 
-    CKL (and potentially other sites) shows an introductory page after
-    launching a chapter, with a "Continue to Questions" button that must
-    be clicked to reach the actual quiz questions.
+    CKL (and potentially other sites) shows one or more instructional
+    pages after launching a chapter, with a "Continue" or "Continue to
+    Questions" button. These must be clicked through to reach actual
+    quiz questions (which have radio buttons).
     """
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        if "Continue to Questions" not in body_text:
-            return  # No preamble, already on question page
+    max_pages = 50  # Safety limit
 
-        logger.info("  Detected chapter preamble, clicking 'Continue to Questions'...")
+    for page_num in range(max_pages):
+        # If page has radio buttons, it's a question — stop
+        if driver.find_elements(By.CSS_SELECTOR, "input[type='radio']"):
+            if page_num > 0:
+                logger.info("  Clicked through %d preamble page(s)", page_num)
+            return
 
-        # Try multiple strategies to find the button
-        for strategy in [
-            lambda: driver.find_element(By.PARTIAL_LINK_TEXT, "Continue to Questions"),
-            lambda: driver.find_element(By.XPATH, "//*[contains(text(), 'Continue to Questions')]"),
-        ]:
+        # Find a Continue button
+        continue_btn = _find_continue_button(driver)
+        if not continue_btn:
+            return  # No continue button — might already be on a question page
+
+        # Verify this looks like a preamble (not a results page with "Continue")
+        if page_num == 0:
             try:
-                btn = strategy()
-                if btn.is_displayed():
-                    _safe_click(driver, btn, "Continue to Questions")
-                    get_adaptive_delay().sleep("next_click")
-                    logger.info("  Clicked 'Continue to Questions'")
+                body_text = driver.find_element(By.TAG_NAME, "body").text
+                has_preamble_indicator = (
+                    bool(re.search(r'Page\s+\d+\s+of\s+\d+', body_text))
+                    or "Back to Practice Set" in body_text
+                    or "Instructions" in body_text
+                    or bool(re.search(r'Step\s+\d+:', body_text))
+                    or "Continue to Questions" in body_text
+                )
+                if not has_preamble_indicator:
                     return
-            except NoSuchElementException:
-                continue
+            except Exception:
+                return
+            logger.info("  Detected chapter preamble pages, clicking through...")
 
-        # Broad search across all clickable elements
-        for el in driver.find_elements(By.CSS_SELECTOR, "a, button, input"):
-            try:
-                text = (el.text or el.get_attribute("value") or "").strip()
-                if "continue to questions" in text.lower() and el.is_displayed():
-                    _safe_click(driver, el, "Continue to Questions")
-                    get_adaptive_delay().sleep("next_click")
-                    logger.info("  Clicked 'Continue to Questions'")
-                    return
-            except StaleElementReferenceException:
-                continue
+        _safe_click(driver, continue_btn, "Continue")
+        get_adaptive_delay().sleep("next_click")
 
-        logger.warning("  'Continue to Questions' text found but button not clickable")
-    except Exception as e:
-        logger.debug("Chapter preamble handling: %s", e)
+    logger.warning("  Exceeded max preamble pages (%d)", max_pages)
+
+
+def _find_continue_button(driver):
+    """Find a Continue / Continue to Questions button on the page."""
+    for text_match in ["Continue to Questions", "Continue"]:
+        try:
+            el = driver.find_element(By.PARTIAL_LINK_TEXT, text_match)
+            if el.is_displayed():
+                return el
+        except NoSuchElementException:
+            pass
+
+    for text_match in ["Continue to Questions", "Continue"]:
+        try:
+            el = driver.find_element(
+                By.XPATH, f"//*[contains(text(), '{text_match}')]"
+            )
+            if el.is_displayed() and el.tag_name in ("a", "button", "input"):
+                return el
+        except NoSuchElementException:
+            pass
+
+    for el in driver.find_elements(By.CSS_SELECTOR, "a, button, input[type='submit']"):
+        try:
+            text = (el.text or el.get_attribute("value") or "").strip().lower()
+            if text.startswith("continue") and el.is_displayed():
+                return el
+        except StaleElementReferenceException:
+            continue
+
+    return None
 
 
 def scrape_chapter_questions(driver, chapter, resume=True):
