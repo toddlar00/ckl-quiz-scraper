@@ -14,14 +14,12 @@ import time
 
 from scraper.browser import create_driver, diagnose_page, login
 from scraper.exporters import ALL_FORMATS, export_all
+from scraper.models import Chapter, PracticeSet, validate_practice_sets
+from scraper.adaptive_delay import AdaptiveDelay, get_adaptive_delay, reset_adaptive_delay
+from scraper.progress import clear_progress
 from scraper.quiz_scraper import (
-    Chapter,
-    PracticeSet,
-    clear_progress,
     discover_chapters,
     discover_practice_sets,
-    get_adaptive_delay,
-    reset_adaptive_delay,
     scrape_chapter_questions,
 )
 from scraper.sites import DEFAULT_SITE, SITE_SCRAPERS
@@ -170,13 +168,12 @@ examples:
         cfg.REQUEST_DELAY = args.delay
         # Fixed delay mode: set the adaptive delay to a fixed budget
         # based on the user's specified delay (scaled up to full budget)
-        from scraper.quiz_scraper import AdaptiveDelay, _adaptive_delay
-        import scraper.quiz_scraper as qs
+        import scraper.adaptive_delay as ad_mod
         fixed = AdaptiveDelay(initial_budget=args.delay * 9.0)
         # Override on_success/on_failure to be no-ops (fixed mode)
         fixed.on_success = lambda: None
         fixed.on_failure = lambda: None
-        qs._adaptive_delay = fixed
+        ad_mod._adaptive_delay = fixed
     if args.fresh:
         clear_progress()
         reset_adaptive_delay()
@@ -327,6 +324,11 @@ examples:
                 logger.info("  Time elapsed:  %.0f seconds", elapsed)
                 logger.info("Run without --dry-run to scrape questions.")
                 return
+
+        # Validate extracted data
+        warning_count = validate_practice_sets(all_practice_sets)
+        if warning_count:
+            logger.info("Data validation: %d warning(s) found (see above)", warning_count)
 
         # Export results
         total_questions = sum(

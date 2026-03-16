@@ -9,21 +9,27 @@ To add support for a new quiz site:
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import asdict
 
+from scraper.models import Chapter, PracticeSet, QuizQuestion
+from scraper.adaptive_delay import get_adaptive_delay
+from scraper.progress import (
+    is_chapter_completed,
+    load_chapter_checkpoint,
+    mark_chapter_completed,
+    save_chapter_checkpoint,
+)
 from scraper.quiz_scraper import (
-    Chapter,
-    PracticeSet,
-    QuizQuestion,
     _get_body_text,
     _retry,
     _safe_click,
     _safe_get,
-    get_adaptive_delay,
-    is_chapter_completed,
-    mark_chapter_completed,
 )
 
 logger = logging.getLogger(__name__)
+
+# Checkpoint frequency: save progress every N questions
+CHECKPOINT_INTERVAL = 5
 
 
 class BaseScraper(ABC):
@@ -150,6 +156,8 @@ class BaseScraper(ABC):
     def scrape_chapter(self, chapter, resume=True):
         """Scrape all questions from a chapter. Handles retries, adaptive delay, progress.
 
+        Supports mid-chapter resume via question-level checkpointing.
+
         Args:
             chapter: Chapter object to populate.
             resume: Skip if already completed in a previous run.
@@ -161,14 +169,26 @@ class BaseScraper(ABC):
             logger.info("  Skipping (already scraped in previous run)")
             return chapter.questions
 
+        # Check for mid-chapter checkpoint
+        checkpoint_offset, checkpoint_data = load_chapter_checkpoint(chapter.launch_url)
+
         _safe_get(self.driver, chapter.launch_url, f"chapter: {chapter.chapter_name}")
 
         initial_body = _get_body_text(self.driver)
         total = self.get_total_questions(initial_body)
         logger.info("  %s question(s) to scrape", total or "Unknown number of")
 
+        # Restore questions from checkpoint if available
         questions = []
-        question_num = 0
+        if checkpoint_offset > 0 and checkpoint_data:
+            questions = [QuizQuestion(**qd) for qd in checkpoint_data]
+            logger.info("  Restored %d questions from checkpoint", len(questions))
+            # Skip to the checkpoint position
+            for _ in range(checkpoint_offset):
+                if not self.click_next_question():
+                    break
+
+        question_num = checkpoint_offset
         max_questions = total or 200
         consecutive_failures = 0
 
@@ -176,26 +196,38 @@ class BaseScraper(ABC):
             question_num += 1
             adaptive = get_adaptive_delay()
 
-            # Occasional random scroll to simulate reading (every ~5 questions)
-            import random
-            if random.random() < 0.2:
-                from scraper.human_behavior import random_scroll
+            # Occasional random scroll to simulate reading
+            from scraper.human_behavior import random_scroll, should_scroll
+            if should_scroll():
                 random_scroll(self.driver)
 
             try:
                 q = self._scrape_single_question(question_num, total or 0)
                 if q:
+                    # Validate extracted question
+                    warnings = q.validate()
+                    for w in warnings:
+                        logger.warning("  %s", w)
+
                     questions.append(q)
                     consecutive_failures = 0
                     adaptive.on_success()
                     logger.info(
-                        "  [%d/%s] %s → Answer: %s (delay: %.1fs)",
+                        "  [%d/%s] %s -> Answer: %s (delay: %.1fs)",
                         q.question_number,
                         total or "?",
                         q.question_text[:60] + ("..." if len(q.question_text) > 60 else ""),
                         q.correct_answer or "unknown",
                         adaptive.budget,
                     )
+
+                    # Periodic checkpoint for mid-chapter resume
+                    if len(questions) % CHECKPOINT_INTERVAL == 0:
+                        save_chapter_checkpoint(
+                            chapter.launch_url,
+                            len(questions),
+                            [asdict(q) for q in questions],
+                        )
                 else:
                     consecutive_failures += 1
                     adaptive.on_failure()
@@ -251,6 +283,12 @@ class BaseScraper(ABC):
 
         # Extract per-choice explanations (why each answer is correct/incorrect)
         choice_explanations = self.extract_choice_explanations(post_body, choices, correct_answer)
+        if not choice_explanations and correct_answer and choices:
+            logger.debug(
+                "  Q%d: No site-specific per-choice explanations found, "
+                "using fallback generation",
+                question_num,
+            )
 
         # Mark correct choice and attach per-choice explanations
         for choice in choices:

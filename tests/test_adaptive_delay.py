@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from scraper.quiz_scraper import (
+from scraper.adaptive_delay import (
     AdaptiveDelay,
     DEFAULT_DELAY_BUDGET,
     DELAY_FRACTIONS,
@@ -16,7 +16,7 @@ from scraper.quiz_scraper import (
 def isolate_delay_file(tmp_path, monkeypatch):
     """Ensure every test uses its own delay file (no disk pollution)."""
     delay_file = str(tmp_path / "test_delay.json")
-    monkeypatch.setattr("scraper.quiz_scraper.ADAPTIVE_DELAY_FILE", delay_file)
+    monkeypatch.setattr("scraper.adaptive_delay.ADAPTIVE_DELAY_FILE", delay_file)
 
 
 class TestAdaptiveDelay:
@@ -119,3 +119,44 @@ class TestAdaptiveDelay:
         ad.on_success()  # 4.0
         ad.on_success()  # 3.0
         assert ad.budget == 3.0
+
+    def test_thread_safety_no_crash(self):
+        """Concurrent access to on_success/on_failure should not crash."""
+        import threading
+        ad = AdaptiveDelay(initial_budget=15.0)
+        errors = []
+
+        def hammer_success():
+            try:
+                for _ in range(20):
+                    ad.on_success()
+            except Exception as e:
+                errors.append(e)
+
+        def hammer_failure():
+            try:
+                for _ in range(20):
+                    ad.on_failure()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=hammer_success),
+            threading.Thread(target=hammer_failure),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        # Budget should be between min and max
+        assert 0.5 <= ad.budget <= 30.0
+
+    def test_sleep_minimum_floor(self):
+        """Sleep duration should never be below the enforced minimum."""
+        ad = AdaptiveDelay(initial_budget=1.0)
+        # Even with jitter, get() should return a positive value
+        for point in DELAY_FRACTIONS:
+            duration = ad.get(point)
+            assert duration >= 0.0

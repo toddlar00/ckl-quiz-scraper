@@ -166,7 +166,7 @@ class TestQuizQuestionModel:
     """Test QuizQuestion dataclass fields."""
 
     def test_choice_explanations_default(self):
-        from scraper.quiz_scraper import QuizQuestion
+        from scraper.models import QuizQuestion
         q = QuizQuestion(
             question_number=1, total_questions=1,
             question_type="MC", question_text="Test?",
@@ -175,7 +175,7 @@ class TestQuizQuestionModel:
         assert q.choices == []
 
     def test_choice_explanations_populated(self):
-        from scraper.quiz_scraper import QuizQuestion
+        from scraper.models import QuizQuestion
         q = QuizQuestion(
             question_number=1, total_questions=1,
             question_type="MC", question_text="Test?",
@@ -240,3 +240,13 @@ class TestHumanBehavior:
     def test_stealth_js_contains_webgl_override(self):
         from scraper.human_behavior import STEALTH_JS
         assert "WebGLRenderingContext" in STEALTH_JS
+
+    def test_should_scroll_returns_bool(self):
+        from scraper.human_behavior import should_scroll
+        result = should_scroll()
+        assert isinstance(result, bool)
+
+    def test_configurable_timing_defaults(self):
+        from scraper.human_behavior import TYPING_MIN_DELAY, TYPING_MAX_DELAY, THINK_MIN, THINK_MAX
+        assert 0 < TYPING_MIN_DELAY < TYPING_MAX_DELAY
+        assert 0 < THINK_MIN < THINK_MAX

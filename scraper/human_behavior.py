@@ -2,10 +2,18 @@
 
 Provides realistic typing, mouse movement, scrolling, and timing
 to make Selenium interactions appear natural to anti-bot systems.
+
+Timing profiles can be configured via environment variables:
+  HUMAN_TYPING_MIN=0.03   Minimum delay between keystrokes (seconds)
+  HUMAN_TYPING_MAX=0.15   Maximum delay between keystrokes (seconds)
+  HUMAN_THINK_MIN=0.5     Minimum thinking pause (seconds)
+  HUMAN_THINK_MAX=2.5     Maximum thinking pause (seconds)
+  HUMAN_SCROLL_CHANCE=0.2 Probability of random scroll per question (0-1)
 """
 
 import logging
 import math
+import os
 import random
 import time
 
@@ -16,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Configurable timing profiles
+# ---------------------------------------------------------------------------
+
+TYPING_MIN_DELAY = float(os.getenv("HUMAN_TYPING_MIN", "0.03"))
+TYPING_MAX_DELAY = float(os.getenv("HUMAN_TYPING_MAX", "0.15"))
+THINK_MIN = float(os.getenv("HUMAN_THINK_MIN", "0.5"))
+THINK_MAX = float(os.getenv("HUMAN_THINK_MAX", "2.5"))
+SCROLL_CHANCE = float(os.getenv("HUMAN_SCROLL_CHANCE", "0.2"))
+
+
+# ---------------------------------------------------------------------------
 # Randomized timing
 # ---------------------------------------------------------------------------
 
@@ -23,7 +42,7 @@ def human_delay(base_seconds, jitter_ratio=0.5):
     """Sleep for a human-like duration with random jitter.
 
     Adds gaussian jitter around the base value so delays aren't uniform.
-    E.g., base=2.0, jitter_ratio=0.5 → sleeps between ~1.0 and ~3.0 seconds.
+    E.g., base=2.0, jitter_ratio=0.5 -> sleeps between ~1.0 and ~3.0 seconds.
     """
     if base_seconds <= 0:
         return
@@ -33,27 +52,37 @@ def human_delay(base_seconds, jitter_ratio=0.5):
 
 
 def random_micro_delay():
-    """Tiny random pause (50–300ms) to simulate human reaction time."""
+    """Tiny random pause (50-300ms) to simulate human reaction time."""
     time.sleep(random.uniform(0.05, 0.3))
 
 
 def random_think_pause():
-    """Simulate a human reading/thinking pause (0.5–2.5 seconds)."""
-    time.sleep(random.uniform(0.5, 2.5))
+    """Simulate a human reading/thinking pause (configurable range)."""
+    time.sleep(random.uniform(THINK_MIN, THINK_MAX))
 
 
 # ---------------------------------------------------------------------------
 # Human-like typing
 # ---------------------------------------------------------------------------
 
-def human_type(element, text, min_delay=0.03, max_delay=0.15):
+def human_type(element, text, min_delay=None, max_delay=None):
     """Type text character by character with natural inter-key timing.
 
     Simulates human typing speed with:
       - Variable delay between keystrokes
       - Occasional brief pauses (as if thinking)
       - Slightly faster for common sequences
+      - Occasional burst speed for familiar words
+
+    Args:
+        element: Selenium WebElement to type into.
+        text: String to type.
+        min_delay: Minimum keystroke delay (default from config).
+        max_delay: Maximum keystroke delay (default from config).
     """
+    min_delay = min_delay or TYPING_MIN_DELAY
+    max_delay = max_delay or TYPING_MAX_DELAY
+
     for i, char in enumerate(text):
         element.send_keys(char)
 
@@ -67,6 +96,10 @@ def human_type(element, text, min_delay=0.03, max_delay=0.15):
         # Slightly faster after common sequences (muscle memory)
         if i > 0 and text[i - 1:i + 1].lower() in ("th", "he", "in", "er", "an", "re", "on"):
             delay *= 0.6
+
+        # Brief pause after spaces (word boundary)
+        if char == " " and random.random() < 0.15:
+            delay += random.uniform(0.1, 0.3)
 
         time.sleep(delay)
 
@@ -143,7 +176,6 @@ def human_scroll_to_element(driver, element):
 
         if not in_viewport:
             # Smooth scroll with slight offset (humans don't scroll to exact pixel)
-            offset = random.randint(-50, 50)
             driver.execute_script("""
                 arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});
             """, element)
@@ -153,15 +185,37 @@ def human_scroll_to_element(driver, element):
 
 
 def random_scroll(driver):
-    """Occasionally scroll the page slightly, as a human might while reading."""
+    """Scroll the page slightly to simulate human reading behavior.
+
+    Simulates natural reading patterns:
+      - Small scrolls (reading next paragraph)
+      - Occasional scroll-back (re-reading)
+      - Variable scroll speeds
+    """
     try:
-        scroll_amount = random.randint(50, 200)
-        if random.random() < 0.5:
-            scroll_amount = -scroll_amount  # Sometimes scroll up
+        # Vary scroll amount — sometimes small, sometimes larger
+        if random.random() < 0.7:
+            # Small scroll (reading next paragraph)
+            scroll_amount = random.randint(80, 250)
+        else:
+            # Larger scroll (skimming)
+            scroll_amount = random.randint(250, 500)
+
+        if random.random() < 0.25:
+            scroll_amount = -scroll_amount  # Scroll back up to re-read
+
         driver.execute_script(f"window.scrollBy({{top: {scroll_amount}, behavior: 'smooth'}});")
-        time.sleep(random.uniform(0.2, 0.5))
+        time.sleep(random.uniform(0.3, 0.8))
     except Exception:
         pass
+
+
+def should_scroll():
+    """Decide whether to perform a random scroll this iteration.
+
+    Returns True with probability SCROLL_CHANCE (default 20%).
+    """
+    return random.random() < SCROLL_CHANCE
 
 
 # ---------------------------------------------------------------------------

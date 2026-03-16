@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import time
 from pathlib import Path
 
@@ -23,9 +24,55 @@ COOKIES_FILE = ".ckl_cookies.json"
 SCREENSHOT_DIR = "debug_screenshots"
 
 
+def validate_browser_installation():
+    """Check that Chrome or Chromium is installed and accessible.
+
+    Returns:
+        Path to the Chrome binary, or None if not found.
+    """
+    # Check common binary names
+    for binary in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]:
+        path = shutil.which(binary)
+        if path:
+            logger.debug("Found browser: %s at %s", binary, path)
+            return path
+
+    # Check common installation paths
+    common_paths = [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ]
+    for path in common_paths:
+        if os.path.isfile(path):
+            logger.debug("Found browser at %s", path)
+            return path
+
+    return None
+
+
 def create_driver():
-    """Create and configure a Chrome WebDriver instance with anti-detection measures."""
-    import random
+    """Create and configure a Chrome WebDriver instance with anti-detection measures.
+
+    Raises:
+        RuntimeError: If Chrome/Chromium is not installed.
+        Exception: If WebDriver creation fails for other reasons.
+    """
+    # Validate Chrome is available before attempting driver creation
+    chrome_path = validate_browser_installation()
+    if not chrome_path:
+        raise RuntimeError(
+            "Chrome or Chromium is not installed or not in PATH.\n"
+            "Install one of the following:\n"
+            "  Ubuntu/Debian: sudo apt install google-chrome-stable\n"
+            "  Or Chromium:   sudo apt install chromium-browser\n"
+            "  macOS:         brew install --cask google-chrome\n"
+            "  Or download from: https://www.google.com/chrome/"
+        )
+    logger.info("Using browser: %s", chrome_path)
 
     options = Options()
     if config.HEADLESS:
@@ -70,13 +117,14 @@ def create_driver():
         driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
         logger.error(
-            "Failed to create Chrome WebDriver. Ensure Chrome is installed.\n"
+            "Failed to create Chrome WebDriver.\n"
             "  Error: %s\n"
+            "  Browser found at: %s\n"
             "  Troubleshooting:\n"
-            "    - Install Chrome: sudo apt install google-chrome-stable\n"
-            "    - Or use Chromium: sudo apt install chromium-browser\n"
-            "    - Ensure matching chromedriver is available",
-            e,
+            "    - Ensure chromedriver matches your Chrome version\n"
+            "    - Try: pip install --upgrade webdriver-manager\n"
+            "    - Check Chrome version: google-chrome --version",
+            e, chrome_path,
         )
         raise
 
@@ -155,22 +203,30 @@ def load_cookies(driver):
     try:
         with open(COOKIES_FILE, "r", encoding="utf-8") as f:
             cookies = json.load(f)
+        if not isinstance(cookies, list):
+            logger.debug("Invalid cookies file format (expected list)")
+            return False
         # Must navigate to the domain first before adding cookies
         base = config.BASE_URL.rstrip("/")
         driver.get(base)
         time.sleep(2)
+        loaded = 0
         for cookie in cookies:
             # Remove problematic fields that may differ across sessions
             cookie.pop("sameSite", None)
             cookie.pop("expiry", None)
             try:
                 driver.add_cookie(cookie)
+                loaded += 1
             except Exception:
                 continue
-        logger.debug("Loaded %d cookies from %s", len(cookies), COOKIES_FILE)
-        return True
-    except Exception as e:
-        logger.debug("Could not load cookies: %s", e)
+        logger.debug("Loaded %d/%d cookies from %s", loaded, len(cookies), COOKIES_FILE)
+        return loaded > 0
+    except json.JSONDecodeError as e:
+        logger.debug("Corrupt cookies file: %s", e)
+        return False
+    except OSError as e:
+        logger.debug("Could not read cookies file: %s", e)
         return False
 
 

@@ -1,7 +1,7 @@
 """Shared test fixtures for exporter tests."""
 
 import pytest
-from scraper.quiz_scraper import Chapter, PracticeSet, QuizQuestion
+from scraper.models import Chapter, PracticeSet, QuizQuestion
 
 
 @pytest.fixture

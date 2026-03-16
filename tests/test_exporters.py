@@ -230,6 +230,50 @@ class TestKahootExport:
             row = next(reader)
         assert len(row["Question"]) <= 300
 
+    def test_long_question_gets_ellipsis(self, tmp_path):
+        """Questions over 300 chars should be truncated with ellipsis."""
+        from scraper.models import QuizQuestion, Chapter, PracticeSet
+        q = QuizQuestion(
+            question_number=1, total_questions=1,
+            question_type="MC",
+            question_text="X" * 400,
+            choices=[
+                {"label": "A", "text": "One", "is_correct": True},
+                {"label": "B", "text": "Two", "is_correct": False},
+            ],
+            correct_answer="A",
+        )
+        ch = Chapter(chapter_name="Ch1", launch_url="url", questions=[q])
+        ps = [PracticeSet(title="Test", url="url", chapters=[ch])]
+        path = export_kahoot(ps, str(tmp_path))
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            row = next(reader)
+        assert len(row["Question"]) <= 300
+        assert row["Question"].endswith("...")
+
+    def test_long_answer_gets_ellipsis(self, tmp_path):
+        """Answers over 75 chars should be truncated with ellipsis."""
+        from scraper.models import QuizQuestion, Chapter, PracticeSet
+        q = QuizQuestion(
+            question_number=1, total_questions=1,
+            question_type="MC",
+            question_text="What?",
+            choices=[
+                {"label": "A", "text": "Y" * 100, "is_correct": True},
+                {"label": "B", "text": "Short", "is_correct": False},
+            ],
+            correct_answer="A",
+        )
+        ch = Chapter(chapter_name="Ch1", launch_url="url", questions=[q])
+        ps = [PracticeSet(title="Test", url="url", chapters=[ch])]
+        path = export_kahoot(ps, str(tmp_path))
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            row = next(reader)
+        assert len(row["Answer 1"]) <= 75
+        assert row["Answer 1"].endswith("...")
+
 
 # ---- Moodle GIFT Export ----
 
@@ -269,6 +313,39 @@ class TestMoodleGiftExport:
         assert "::CKL_Q1::" in content
         assert "{" in content
         assert "}" in content
+
+    def test_essay_question_format(self, tmp_path):
+        """Essay questions should use empty braces {}."""
+        from scraper.models import QuizQuestion, Chapter, PracticeSet
+        q = QuizQuestion(
+            question_number=1, total_questions=1,
+            question_type="Essay",
+            question_text="Discuss the concept of due process.",
+        )
+        ch = Chapter(chapter_name="Ch1", launch_url="url", questions=[q])
+        ps = [PracticeSet(title="Test", url="url", chapters=[ch])]
+        path = export_moodle_gift(ps, str(tmp_path))
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        assert "due process" in content
+        assert "{}" in content  # Essay marker
+
+    def test_short_answer_format(self, tmp_path):
+        """Short answer questions should use {=answer} format."""
+        from scraper.models import QuizQuestion, Chapter, PracticeSet
+        q = QuizQuestion(
+            question_number=1, total_questions=1,
+            question_type="Short Answer",
+            question_text="What is the capital of France?",
+            correct_answer="Paris",
+            explanation="Paris is the capital of France.",
+        )
+        ch = Chapter(chapter_name="Ch1", launch_url="url", questions=[q])
+        ps = [PracticeSet(title="Test", url="url", chapters=[ch])]
+        path = export_moodle_gift(ps, str(tmp_path))
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        assert "=Paris" in content
 
 
 # ---- Moodle XML Export ----
@@ -359,6 +436,13 @@ class TestCanvasQtiExport:
         assert os.path.exists(path)
         with zipfile.ZipFile(path, "r") as zf:
             assert "imsmanifest.xml" in zf.namelist()
+
+    def test_point_values_present(self, tmp_path, sample_practice_sets):
+        """QTI export should include point values in metadata."""
+        path = export_canvas_qti(sample_practice_sets, str(tmp_path))
+        with zipfile.ZipFile(path, "r") as zf:
+            quiz = zf.read("quiz_questions.xml").decode("utf-8")
+        assert "points_possible" in quiz
 
 
 # ---- Export Dispatcher ----

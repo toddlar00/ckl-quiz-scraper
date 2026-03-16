@@ -1,23 +1,25 @@
 """CKL quiz discovery and scraping logic.
 
 CKL site structure:
-  Home page (after login) → grid of Practice Sets (book covers)
-  Practice Set page → table with chapters, each with "Launch" links
-  Quiz page → one question at a time, "Question X of Y"
+  Home page (after login) -> grid of Practice Sets (book covers)
+  Practice Set page -> table with chapters, each with "Launch" links
+  Quiz page -> one question at a time, "Question X of Y"
     - "Multiple Choice" label
     - Question text
     - Radio buttons A/B/C/D
-    - "Submit" button → reveals correct answer + explanation
+    - "Submit" button -> reveals correct answer + explanation
     - "Next Question" button to advance
+
+Module Organization:
+  - scraper.models: QuizQuestion, Chapter, PracticeSet dataclasses
+  - scraper.adaptive_delay: AdaptiveDelay throttling system
+  - scraper.progress: Resume/checkpoint support
+  - scraper.quiz_scraper: Discovery, extraction, and scraping orchestration
 """
 
-import json
 import logging
-import os
 import re
 import time
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
 
 from selenium.common.exceptions import (
     NoSuchElementException,
@@ -31,204 +33,26 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from scraper import config
 
+# Re-export from new modules for backward compatibility
+from scraper.models import QuizQuestion, Chapter, PracticeSet, validate_practice_sets  # noqa: F401
+from scraper.adaptive_delay import (  # noqa: F401
+    AdaptiveDelay,
+    DEFAULT_DELAY_BUDGET,
+    DELAY_FRACTIONS,
+    ADAPTIVE_DELAY_FILE,
+    get_adaptive_delay,
+    reset_adaptive_delay,
+)
+from scraper.progress import (  # noqa: F401
+    PROGRESS_FILE,
+    is_chapter_completed,
+    mark_chapter_completed,
+    save_chapter_checkpoint,
+    load_chapter_checkpoint,
+    clear_progress,
+)
+
 logger = logging.getLogger(__name__)
-
-PROGRESS_FILE = ".ckl_progress.json"
-ADAPTIVE_DELAY_FILE = ".ckl_adaptive_delay.json"
-
-# Default total sleep budget per question (sum of all original hardcoded sleeps).
-# Original: 1s (pre-submit) + 2s (post-submit) + 2s (feedback wait) + 3s (next click) + 1s (rate limit) = 9s
-DEFAULT_DELAY_BUDGET = 9.0
-
-# Proportional distribution of the delay budget across sleep points.
-# These fractions sum to 1.0 and represent where time is spent per question.
-DELAY_FRACTIONS = {
-    "pre_submit": 0.11,    # After selecting radio, before clicking Submit (orig 1s)
-    "post_submit": 0.22,   # After clicking Submit, waiting for feedback (orig 2s)
-    "feedback_wait": 0.22, # After submit_answer returns, before reading feedback (orig 2s)
-    "next_click": 0.34,    # After clicking Next Question, waiting for page (orig 3s)
-    "rate_limit": 0.11,    # Between questions rate limit (orig 1s)
-}
-
-
-# ---------------------------------------------------------------------------
-# Adaptive delay manager
-# ---------------------------------------------------------------------------
-
-class AdaptiveDelay:
-    """Finds the minimum viable delay by decreasing on success and increasing on failure.
-
-    Strategy:
-      - Start with a total delay budget (seconds per question).
-      - Each successful question: reduce budget by 1 second.
-      - Each failure (timeout, parse error): increase budget by 1 second.
-      - Individual sleep points get proportional fractions of the total budget.
-      - The learned delay is saved to disk and reloaded on next run.
-    """
-
-    def __init__(self, initial_budget=None):
-        self._budget = initial_budget or DEFAULT_DELAY_BUDGET
-        self._min_budget = 0.5
-        self._max_budget = 30.0
-        self._consecutive_successes = 0
-        self._consecutive_failures = 0
-        self._total_adjustments = 0
-        self._load()
-        logger.info(
-            "Adaptive delay: starting budget = %.1fs per question "
-            "(sleeps: pre_submit=%.1fs, post_submit=%.1fs, feedback=%.1fs, "
-            "next=%.1fs, rate_limit=%.1fs)",
-            self._budget,
-            self.get("pre_submit"), self.get("post_submit"),
-            self.get("feedback_wait"), self.get("next_click"),
-            self.get("rate_limit"),
-        )
-
-    @property
-    def budget(self):
-        return self._budget
-
-    def get(self, sleep_point):
-        """Get the delay in seconds for a named sleep point."""
-        fraction = DELAY_FRACTIONS.get(sleep_point, 0.1)
-        return max(0.0, self._budget * fraction)
-
-    def sleep(self, sleep_point):
-        """Sleep for the adaptive duration with human-like jitter.
-
-        Adds gaussian jitter (±30%) around the computed duration so timing
-        patterns don't look robotic to anti-bot systems.
-        """
-        import random
-        duration = self.get(sleep_point)
-        if duration > 0:
-            # Add jitter: ±30% gaussian noise, clamped to at least 50ms
-            jitter = random.gauss(0, duration * 0.15)
-            actual = max(0.05, duration + jitter)
-            time.sleep(actual)
-
-    def on_success(self):
-        """Called after a question is successfully scraped."""
-        self._consecutive_successes += 1
-        self._consecutive_failures = 0
-        old = self._budget
-        if self._budget > self._min_budget:
-            self._budget = max(self._min_budget, self._budget - 1.0)
-            self._total_adjustments += 1
-        if old != self._budget:
-            logger.info(
-                "  Adaptive delay: success → reduced %.1fs → %.1fs",
-                old, self._budget,
-            )
-        self._save()
-
-    def on_failure(self):
-        """Called after a question fails to scrape (timeout, parse error)."""
-        self._consecutive_failures += 1
-        self._consecutive_successes = 0
-        old = self._budget
-        if self._budget < self._max_budget:
-            self._budget = min(self._max_budget, self._budget + 1.0)
-            self._total_adjustments += 1
-        logger.info(
-            "  Adaptive delay: failure → increased %.1fs → %.1fs",
-            old, self._budget,
-        )
-        self._save()
-
-    def summary(self):
-        """Return a summary dict for logging."""
-        return {
-            "current_budget": self._budget,
-            "total_adjustments": self._total_adjustments,
-            "consecutive_successes": self._consecutive_successes,
-        }
-
-    def _load(self):
-        """Load saved delay from disk."""
-        if not os.path.exists(ADAPTIVE_DELAY_FILE):
-            return
-        try:
-            with open(ADAPTIVE_DELAY_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            saved = data.get("budget")
-            if saved is not None and isinstance(saved, (int, float)):
-                self._budget = max(self._min_budget, min(self._max_budget, float(saved)))
-                logger.info("Loaded saved adaptive delay: %.1fs", self._budget)
-        except Exception as e:
-            logger.debug("Could not load adaptive delay: %s", e)
-
-    def _save(self):
-        """Save current delay to disk."""
-        try:
-            data = {
-                "budget": self._budget,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            with open(ADAPTIVE_DELAY_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.debug("Could not save adaptive delay: %s", e)
-
-
-# The global adaptive delay instance, initialized lazily.
-_adaptive_delay = None
-
-
-def get_adaptive_delay():
-    """Get or create the global AdaptiveDelay instance."""
-    global _adaptive_delay
-    if _adaptive_delay is None:
-        _adaptive_delay = AdaptiveDelay()
-    return _adaptive_delay
-
-
-def reset_adaptive_delay():
-    """Reset the adaptive delay to defaults (for --fresh mode)."""
-    global _adaptive_delay
-    _adaptive_delay = AdaptiveDelay(initial_budget=DEFAULT_DELAY_BUDGET)
-    if os.path.exists(ADAPTIVE_DELAY_FILE):
-        os.remove(ADAPTIVE_DELAY_FILE)
-
-
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
-
-@dataclass
-class QuizQuestion:
-    """A single quiz question with choices, correct answer, and explanation.
-
-    Each choice dict has keys: label, text, is_correct, explanation.
-    The top-level `explanation` is the general/correct-answer explanation.
-    Per-choice explanations explain why each specific choice is correct or incorrect.
-    """
-    question_number: int
-    total_questions: int
-    question_type: str  # e.g. "Multiple Choice"
-    question_text: str
-    choices: list[dict] = field(default_factory=list)
-    correct_answer: str = ""
-    explanation: str = ""
-    choice_explanations: dict = field(default_factory=dict)  # {"A": "...", "B": "..."}
-    source_url: str = ""
-
-
-@dataclass
-class Chapter:
-    """A chapter within a practice set containing quiz questions."""
-    chapter_name: str
-    launch_url: str
-    status: str = ""  # "In Progress", "To Do", etc.
-    questions: list[QuizQuestion] = field(default_factory=list)
-
-
-@dataclass
-class PracticeSet:
-    """A practice set (book) containing chapters with questions."""
-    title: str
-    url: str
-    chapters: list[Chapter] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +83,7 @@ def _retry(func, retries=3, delay=2, description="action"):
 
 
 def _safe_get(driver, url, description="page"):
-    """Navigate to a URL with retry logic and stealth re-injection."""
+    """Navigate to a URL with retry logic, stealth re-injection, and HTTP error detection."""
     def _do_get():
         driver.get(url)
         # Wait for body to be present and page to finish loading
@@ -270,10 +94,45 @@ def _safe_get(driver, url, description="page"):
         WebDriverWait(driver, 10).until(
             lambda d: d.execute_script("return document.readyState") == "complete"
         )
+        # Check for HTTP error pages (rate limiting, server errors)
+        _check_http_errors(driver, url)
         # Re-inject stealth JS after navigation (page context resets)
         from scraper.human_behavior import inject_stealth
         inject_stealth(driver)
     _retry(_do_get, retries=3, delay=2, description=f"Loading {description}")
+
+
+def _check_http_errors(driver, url):
+    """Detect HTTP error pages and raise appropriate exceptions.
+
+    Checks for 429 Too Many Requests, 403 Forbidden, and 5xx errors
+    that may appear as error pages after navigation.
+    """
+    try:
+        title = driver.title.lower()
+        body_text = driver.find_element(By.TAG_NAME, "body").text[:500].lower()
+        combined = f"{title} {body_text}"
+
+        if "429" in combined or "too many requests" in combined or "rate limit" in combined:
+            logger.warning("Rate limited (429) at %s — backing off", url)
+            # Exponential backoff for rate limiting
+            delay = get_adaptive_delay()
+            delay.on_failure()
+            delay.on_failure()  # Double penalty for rate limiting
+            raise WebDriverException(f"HTTP 429 Too Many Requests at {url}")
+
+        if "403" in title and "forbidden" in combined:
+            logger.warning("Access forbidden (403) at %s", url)
+            raise WebDriverException(f"HTTP 403 Forbidden at {url}")
+
+        if any(code in title for code in ("500", "502", "503", "504")):
+            logger.warning("Server error at %s: %s", url, title)
+            raise WebDriverException(f"Server error at {url}: {title}")
+
+    except WebDriverException:
+        raise
+    except Exception:
+        pass  # Body text extraction failed — not an error page
 
 
 def _safe_click(driver, element, description="element"):
@@ -284,55 +143,6 @@ def _safe_click(driver, element, description="element"):
     except Exception as e:
         logger.warning("Could not click %s: %s", description, e)
         raise
-
-
-# ---------------------------------------------------------------------------
-# Progress tracking (resume support)
-# ---------------------------------------------------------------------------
-
-def _load_progress():
-    """Load scraping progress from disk. Returns set of completed chapter URLs."""
-    if not os.path.exists(PROGRESS_FILE):
-        return {}
-    try:
-        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_progress(data):
-    """Save scraping progress to disk."""
-    try:
-        with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.debug("Could not save progress: %s", e)
-
-
-def is_chapter_completed(chapter_url):
-    """Check if a chapter was already scraped in a previous run."""
-    progress = _load_progress()
-    return chapter_url in progress.get("completed_chapters", {})
-
-
-def mark_chapter_completed(chapter_url, question_count):
-    """Mark a chapter as completed in the progress file."""
-    progress = _load_progress()
-    if "completed_chapters" not in progress:
-        progress["completed_chapters"] = {}
-    progress["completed_chapters"][chapter_url] = {
-        "question_count": question_count,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    _save_progress(progress)
-
-
-def clear_progress():
-    """Delete the progress file to start fresh."""
-    if os.path.exists(PROGRESS_FILE):
-        os.remove(PROGRESS_FILE)
-        logger.info("Progress file cleared")
 
 
 # ---------------------------------------------------------------------------
@@ -558,13 +368,21 @@ def scrape_chapter_questions(driver, chapter, resume=True):
                 consecutive_failures = 0
                 adaptive.on_success()
                 logger.info(
-                    "  [%d/%s] %s → Answer: %s (delay: %.1fs)",
+                    "  [%d/%s] %s -> Answer: %s (delay: %.1fs)",
                     q.question_number,
                     total or "?",
                     q.question_text[:60] + ("..." if len(q.question_text) > 60 else ""),
                     q.correct_answer or "unknown",
                     adaptive.budget,
                 )
+                # Checkpoint every 5 questions for mid-chapter resume
+                if len(questions) % 5 == 0:
+                    from dataclasses import asdict
+                    save_chapter_checkpoint(
+                        chapter.launch_url,
+                        len(questions),
+                        [asdict(q) for q in questions],
+                    )
             else:
                 consecutive_failures += 1
                 adaptive.on_failure()
@@ -572,7 +390,7 @@ def scrape_chapter_questions(driver, chapter, resume=True):
                 from scraper.browser import diagnose_page
                 diagnose_page(driver, f"parse_fail_q{question_num}")
 
-            # Too many consecutive failures → something is wrong
+            # Too many consecutive failures -> something is wrong
             if consecutive_failures >= 3:
                 logger.error(
                     "  3 consecutive failures — stopping chapter scrape.\n"

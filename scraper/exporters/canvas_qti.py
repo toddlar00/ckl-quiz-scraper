@@ -79,8 +79,15 @@ def _build_quiz_xml(practice_sets):
     return _pretty_xml(root)
 
 
-def _add_question_item(section, q, question_id):
-    """Add a single multiple-choice question item to a QTI section."""
+def _add_question_item(section, q, question_id, points_per_question=1.0):
+    """Add a single multiple-choice question item to a QTI section.
+
+    Args:
+        section: Parent XML section element.
+        q: QuizQuestion object.
+        question_id: Numeric question identifier.
+        points_per_question: Point value for this question (default 1.0).
+    """
     q_ident = f"Q{question_id:04d}"
     rl_ident = f"RL{question_id:04d}"
 
@@ -88,6 +95,13 @@ def _add_question_item(section, q, question_id):
         "title": f"Question {question_id}",
         "ident": q_ident,
     })
+
+    # Item metadata (point value)
+    itemmetadata = SubElement(item, "itemmetadata")
+    qtimetadata = SubElement(itemmetadata, "qtimetadata")
+    field = SubElement(qtimetadata, "qtimetadatafield")
+    SubElement(field, "fieldlabel").text = "points_possible"
+    SubElement(field, "fieldentry").text = str(points_per_question)
 
     # Presentation block
     presentation = SubElement(item, "presentation")
