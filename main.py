@@ -23,6 +23,7 @@ from scraper.quiz_scraper import (
     discover_practice_sets,
     scrape_chapter_questions,
 )
+from scraper.site_mapper import SiteMap, map_site
 from scraper.sites import DEFAULT_SITE, SITE_SCRAPERS
 
 
@@ -70,6 +71,7 @@ examples:
   %(prog)s --format json csv anki                # specific export formats
   %(prog)s --chapter-url URL                     # scrape one chapter directly
   %(prog)s --fresh                               # ignore previous progress
+  %(prog)s --map                                   # map site structure without scraping
   %(prog)s --mc-only                              # only record multiple-choice questions
   %(prog)s --no-headless -v                      # debug mode (visible browser)
   %(prog)s --dry-run                             # preview what would be scraped
@@ -145,6 +147,11 @@ examples:
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose/debug logging",
+    )
+    behavior.add_argument(
+        "--map",
+        action="store_true",
+        help="Map website structure (practice sets, chapters, question counts/types) without scraping",
     )
     behavior.add_argument(
         "--mc-only",
@@ -225,6 +232,13 @@ examples:
                 sys.exit(1)
             logger.info("Login successful!")
 
+        # Map mode: discover full site structure and exit
+        if args.map:
+            logger.info("Mapping website structure...")
+            site_map = map_site(driver, site, peek_chapters=True)
+            site_map.print_summary()
+            return
+
         # Direct chapter URL mode
         if args.chapter_url:
             if args.dry_run:
@@ -246,6 +260,13 @@ examples:
             all_practice_sets.append(ps)
 
         else:
+            # Map site structure first (cached for future runs)
+            cached_map = SiteMap.load()
+            if not cached_map:
+                logger.info("Mapping website structure before scraping...")
+                cached_map = map_site(driver, site, peek_chapters=True)
+                cached_map.print_summary()
+
             # Discover practice sets
             logger.info("Discovering practice sets...")
             ps_links = site.discover_practice_sets()
