@@ -13,6 +13,7 @@ from dataclasses import asdict
 
 from scraper.models import Chapter, PracticeSet, QuizQuestion
 from scraper.adaptive_delay import get_adaptive_delay
+from scraper.layout_learner import is_multiple_choice_question, learn_layout
 from scraper.shutdown import shutdown_requested
 from scraper.progress import (
     is_chapter_completed,
@@ -48,6 +49,8 @@ class BaseScraper(ABC):
 
     def __init__(self, driver):
         self.driver = driver
+        self.mc_only = False
+        self.layout_profile = None
 
     # ------------------------------------------------------------------
     # Abstract methods — must be implemented by each site scraper
@@ -165,7 +168,7 @@ class BaseScraper(ABC):
     # Framework methods — shared across all scrapers
     # ------------------------------------------------------------------
 
-    def scrape_chapter(self, chapter, resume=True):
+    def scrape_chapter(self, chapter, resume=True, mc_only=None):
         """Scrape all questions from a chapter. Handles retries, adaptive delay, progress.
 
         Supports mid-chapter resume via question-level checkpointing.
@@ -173,10 +176,14 @@ class BaseScraper(ABC):
         Args:
             chapter: Chapter object to populate.
             resume: Skip if already completed in a previous run.
+            mc_only: If True, skip non-multiple-choice questions. Uses instance
+                     default (self.mc_only) when None.
 
         Returns:
             List of QuizQuestion objects.
         """
+        if mc_only is None:
+            mc_only = self.mc_only
         if resume and is_chapter_completed(chapter.launch_url):
             logger.info("  Skipping (already scraped in previous run)")
             return chapter.questions
@@ -189,9 +196,15 @@ class BaseScraper(ABC):
         # Handle chapter preamble/intro pages (e.g. "Continue to Questions")
         self.prepare_chapter()
 
+        # Learn layout on first chapter if mc_only is enabled
+        if mc_only and not self.layout_profile:
+            self.layout_profile = learn_layout(self.driver, self, max_sample_pages=3)
+
         initial_body = _get_body_text(self.driver)
         total = self.get_total_questions(initial_body)
-        logger.info("  %s question(s) to scrape", total or "Unknown number of")
+        logger.info("  %s question(s) to scrape%s",
+                     total or "Unknown number of",
+                     " (MC only)" if mc_only else "")
 
         # Restore questions from checkpoint if available
         questions = []
@@ -225,6 +238,22 @@ class BaseScraper(ABC):
             from scraper.human_behavior import random_scroll, should_scroll
             if should_scroll():
                 random_scroll(self.driver)
+
+            # Skip non-MC questions when mc_only is enabled
+            if mc_only:
+                body_text = _get_body_text(self.driver)
+                if not is_multiple_choice_question(self.driver, body_text, self.layout_profile):
+                    logger.info("  [%d/%s] Skipping non-MC question", question_num, total or "?")
+                    # Still need to submit and advance past this question
+                    try:
+                        self.submit_answer()
+                        if not self.click_next_question():
+                            logger.info("  Finished chapter (%d questions scraped)", len(questions))
+                            break
+                    except Exception:
+                        if not self.click_next_question():
+                            break
+                    continue
 
             try:
                 q = self._scrape_single_question(question_num, total or 0)

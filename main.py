@@ -70,6 +70,7 @@ examples:
   %(prog)s --format json csv anki                # specific export formats
   %(prog)s --chapter-url URL                     # scrape one chapter directly
   %(prog)s --fresh                               # ignore previous progress
+  %(prog)s --mc-only                              # only record multiple-choice questions
   %(prog)s --no-headless -v                      # debug mode (visible browser)
   %(prog)s --dry-run                             # preview what would be scraped
   %(prog)s --log-file scrape.log                 # save log output to file
@@ -146,6 +147,11 @@ examples:
         help="Enable verbose/debug logging",
     )
     behavior.add_argument(
+        "--mc-only",
+        action="store_true",
+        help="Only record multiple-choice questions (skip fill-in, essay, select-all, etc.)",
+    )
+    behavior.add_argument(
         "--dry-run",
         action="store_true",
         help="Discover practice sets and chapters without scraping questions",
@@ -191,6 +197,7 @@ examples:
         logger.info("Starting %s scraper...", scraper_cls.SITE_NAME)
         driver = create_driver()
         site = scraper_cls(driver)
+        site.mc_only = args.mc_only
 
         # Login
         if not args.skip_login:
