@@ -381,17 +381,14 @@ class CKLScraper(BaseScraper):
                     clicked_radio = True
                     break
 
-            # Short Answer / Fill-in: type a placeholder into the text field
+            # Short Answer / Fill-in / Essay: type into the text editor.
+            # CKL uses a rich-text editor (contenteditable div or iframe-based
+            # like TinyMCE/CKEditor) with formatting toolbar (U, I, ¶, §, A).
+            # Try multiple strategies to get text into the editor.
             if not clicked_radio:
-                text_inputs = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "input[type='text']:not([name*='search']):not([name*='filter']), textarea"
-                )
-                for inp in text_inputs:
-                    if inp.is_displayed() and inp.is_enabled():
-                        inp.clear()
-                        inp.send_keys("N/A")
-                        break
+                typed = self._type_into_editor("N/A")
+                if not typed:
+                    logger.warning("  Could not find text input or rich-text editor")
 
             get_adaptive_delay().sleep("pre_submit")
             submit_btn = _find_button(self.driver, ["submit"])
@@ -405,6 +402,109 @@ class CKLScraper(BaseScraper):
         except Exception as e:
             logger.warning("  Error submitting answer: %s", e)
 
+    def _type_into_editor(self, text):
+        """Type text into whatever input is on the page (plain or rich-text).
+
+        Tries in order:
+          1. Plain <textarea> or <input type="text">
+          2. contenteditable element (inline rich-text editor)
+          3. iframe-based editor (TinyMCE, CKEditor)
+
+        Returns True if text was entered successfully.
+        """
+        # Strategy 1: plain textarea / text input
+        plain_inputs = self.driver.find_elements(
+            By.CSS_SELECTOR,
+            "textarea, input[type='text']:not([name*='search']):not([name*='filter'])"
+        )
+        for inp in plain_inputs:
+            try:
+                if inp.is_displayed() and inp.is_enabled():
+                    inp.clear()
+                    inp.send_keys(text)
+                    logger.debug("  Typed into plain input/textarea")
+                    return True
+            except Exception:
+                continue
+
+        # Strategy 2: contenteditable div (common in modern rich-text editors)
+        editable_els = self.driver.find_elements(
+            By.CSS_SELECTOR, "[contenteditable='true']"
+        )
+        for el in editable_els:
+            try:
+                if el.is_displayed():
+                    el.click()
+                    el.send_keys(text)
+                    logger.debug("  Typed into contenteditable element")
+                    return True
+            except Exception:
+                continue
+
+        # Strategy 3: iframe-based editor (TinyMCE, CKEditor, etc.)
+        # These embed the editable area inside an iframe.
+        iframes = self.driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for iframe in iframes:
+            try:
+                # Skip non-editor iframes (ads, tracking, etc.)
+                iframe_id = (iframe.get_attribute("id") or "").lower()
+                iframe_class = (iframe.get_attribute("class") or "").lower()
+                iframe_title = (iframe.get_attribute("title") or "").lower()
+                is_editor = any(
+                    hint in f"{iframe_id} {iframe_class} {iframe_title}"
+                    for hint in ("editor", "mce", "cke", "tinymce", "ckeditor",
+                                 "rich", "text", "wysiwyg")
+                )
+                # Also check if iframe is near a formatting toolbar
+                if not is_editor and not iframe.is_displayed():
+                    continue
+
+                self.driver.switch_to.frame(iframe)
+                try:
+                    body = self.driver.find_element(By.TAG_NAME, "body")
+                    if body.get_attribute("contenteditable") or body.is_enabled():
+                        body.click()
+                        body.send_keys(text)
+                        logger.debug("  Typed into iframe-based editor")
+                        return True
+                except Exception:
+                    pass
+                finally:
+                    self.driver.switch_to.default_content()
+            except Exception:
+                try:
+                    self.driver.switch_to.default_content()
+                except Exception:
+                    pass
+                continue
+
+        # Strategy 4: JavaScript fallback — find any editable area and set its content
+        try:
+            typed = self.driver.execute_script("""
+                // Try contenteditable
+                var ed = document.querySelector('[contenteditable="true"]');
+                if (ed) { ed.innerText = arguments[0]; return true; }
+                // Try iframe editor body
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    try {
+                        var body = iframes[i].contentDocument.body;
+                        if (body && body.contentEditable !== 'false') {
+                            body.innerText = arguments[0];
+                            return true;
+                        }
+                    } catch(e) {}
+                }
+                return false;
+            """, text)
+            if typed:
+                logger.debug("  Typed into editor via JavaScript fallback")
+                return True
+        except Exception:
+            pass
+
+        return False
+
     def extract_feedback(self, body_text):
         correct_answer = ""
         explanation = ""
@@ -417,7 +517,7 @@ class CKLScraper(BaseScraper):
             if re.search(r'\bCorrect[!.]', body_text) and "incorrect" not in body_text.lower():
                 correct_answer = "A"
 
-        # "Here's Why:" explanation (works for both MC and SA)
+        # "Here's Why:" explanation (MC questions)
         heres_why = re.search(
             r"Here'?s\s+Why:?\s*(.+?)(?=Check this box|You will be able|I'm still confused|Next Question|Back to Practice|$)",
             body_text, re.DOTALL | re.IGNORECASE,
@@ -426,35 +526,52 @@ class CKLScraper(BaseScraper):
             explanation = heres_why.group(1).strip()
             explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
 
-        # Short Answer / open-ended feedback: look for model answer patterns
+        # Short Answer feedback: "Here is a sample answer:" followed by model text,
+        # then a self-assessment prompt ("Did your answer include all of these components?")
         if not correct_answer and not explanation:
-            # Pattern: "Model Answer:" or "Sample Answer:" or "Suggested Answer:"
             sa_match = re.search(
-                r'(?:Model|Sample|Suggested|Correct|Best)\s+(?:Answer|Response):?\s*(.+?)(?=Check this box|You will be able|Next Question|Back to Practice|©\d{4}|$)',
+                r'(?:Here\s+is\s+a\s+sample\s+answer|Sample\s+[Aa]nswer|Model\s+[Aa]nswer|Suggested\s+[Aa]nswer):?\s*(.+?)(?=Did your answer|Check this box|You will be able|I.m still confused|I got it|Select answer|\xa9\d{4}|$)',
                 body_text, re.DOTALL | re.IGNORECASE,
             )
             if sa_match:
                 explanation = sa_match.group(1).strip()
                 explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
-                correct_answer = "(see explanation)"
+                correct_answer = "(sample answer)"
 
-            # If still nothing, grab any substantial text after "Submit" as feedback
-            if not explanation:
-                # For SA questions, CKL often just shows the explanation text
-                # after submit without a specific label
-                post_submit = re.search(
-                    r'(?:Your\s+Answer|Your\s+Response|Feedback):?\s*(.+?)(?=Check this box|Next Question|Back to Practice|©\d{4}|$)',
-                    body_text, re.DOTALL | re.IGNORECASE,
-                )
-                if post_submit:
-                    explanation = post_submit.group(1).strip()
-                    explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
-                    if explanation:
-                        correct_answer = "(see explanation)"
+        # Handle the self-assessment radio buttons that appear after SA feedback.
+        # CKL requires selecting one of: "I got it entirely right", "I got it
+        # mostly right", etc. before you can click "Next Question".
+        if "Did your answer include" in body_text or "I got it entirely right" in body_text:
+            self._complete_self_assessment()
 
         if not correct_answer:
             logger.warning("  Could not determine correct answer from feedback")
         return correct_answer, explanation
+
+    def _complete_self_assessment(self):
+        """Click through the self-assessment radio buttons on SA feedback pages.
+
+        After submitting a Short Answer, CKL shows a sample answer and asks
+        the student to self-assess with radio buttons like:
+          - I got it entirely right
+          - I got it mostly right, but missed something
+          - I got it about half right
+          - I got a small part right
+          - I didn't get anything right
+
+        Select the last option (since we typed "N/A") so we can proceed.
+        """
+        try:
+            radios = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            if radios:
+                # Select the last radio button ("I didn't get anything right")
+                for radio in reversed(radios):
+                    if radio.is_displayed() and radio.is_enabled():
+                        _safe_click(self.driver, radio, "self-assessment radio")
+                        logger.debug("  Clicked self-assessment radio for SA question")
+                        break
+        except Exception as e:
+            logger.debug("  Could not click self-assessment radio: %s", e)
 
     def extract_choice_explanations(self, body_text, choices, correct_answer):
         """Extract per-choice explanations from CKL feedback page.
