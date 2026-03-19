@@ -10,11 +10,9 @@ from pathlib import Path
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
 
 from scraper import config
 
@@ -56,7 +54,7 @@ def _add_proxy_auth_extension(options, parsed_url):
     """ % (parsed_url.username.replace('"', '\\"'),
            parsed_url.password.replace('"', '\\"'))
 
-    ext_path = tempfile.mktemp(suffix=".zip")
+    ext_path = tempfile.NamedTemporaryFile(suffix=".zip", delete=False).name
     with zipfile.ZipFile(ext_path, "w") as zf:
         zf.writestr("manifest.json", manifest)
         zf.writestr("background.js", background)
@@ -135,7 +133,7 @@ def create_driver():
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver}.0.0.0 Safari/537.36",
     ]
-    chrome_ver = random.choice(["120", "121", "122", "123", "124", "125"])
+    chrome_ver = random.choice(["130", "131", "132", "133", "134", "135"])
     user_agent = random.choice(ua_templates).format(ver=chrome_ver)
     options.add_argument(f"--user-agent={user_agent}")
 
@@ -149,8 +147,6 @@ def create_driver():
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-notifications")
-    # Prevent WebRTC IP leaking (can reveal headless)
-    options.add_argument("--disable-webrtc")
     # Accept language header for consistency
     options.add_argument("--lang=en-US")
 
@@ -176,8 +172,9 @@ def create_driver():
         logger.info("Using proxy: %s", proxy_url)
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # Selenium 4.6+ includes Selenium Manager which automatically
+        # downloads and manages the correct chromedriver binary.
+        driver = webdriver.Chrome(options=options)
     except Exception as e:
         logger.error(
             "Failed to create Chrome WebDriver.\n"
@@ -185,14 +182,16 @@ def create_driver():
             "  Browser found at: %s\n"
             "  Troubleshooting:\n"
             "    - Ensure chromedriver matches your Chrome version\n"
-            "    - Try: pip install --upgrade webdriver-manager\n"
+            "    - Try: pip install --upgrade selenium\n"
             "    - Check Chrome version: google-chrome --version",
             e, chrome_path,
         )
         raise
 
     driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
-    driver.implicitly_wait(config.IMPLICIT_WAIT)
+    # Note: implicitly_wait is intentionally not set. Mixing implicit and
+    # explicit waits (WebDriverWait) leads to unpredictable timeout behavior.
+    # All waits in this project use explicit WebDriverWait instead.
 
     # Inject stealth JavaScript via CDP (runs before any page JS)
     from scraper.human_behavior import setup_stealth_on_load

@@ -12,7 +12,6 @@ Timing profiles can be configured via environment variables:
 """
 
 import logging
-import math
 import os
 import random
 import time
