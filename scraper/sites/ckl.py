@@ -268,19 +268,25 @@ class CKLScraper(BaseScraper):
         chapters = []
 
         try:
-            launch_links = self.driver.find_elements(By.PARTIAL_LINK_TEXT, "Launch")
-            if not launch_links:
-                logger.warning("No 'Launch' links found. URL: %s", self.driver.current_url)
+            # CKL shows "Launch" for new chapters, "Revisit" for completed ones
+            action_links = self.driver.find_elements(By.PARTIAL_LINK_TEXT, "Launch")
+            action_links += self.driver.find_elements(By.PARTIAL_LINK_TEXT, "Revisit")
+            if not action_links:
+                logger.warning("No 'Launch' or 'Revisit' links found. URL: %s", self.driver.current_url)
                 from scraper.browser import diagnose_page
                 diagnose_page(self.driver, "no_launch_links")
                 return chapters
 
-            for launch_link in launch_links:
+            seen_hrefs = set()
+            for link in action_links:
                 try:
-                    href = launch_link.get_attribute("href") or ""
-                    if not href:
+                    href = link.get_attribute("href") or ""
+                    if not href or href in seen_hrefs:
                         continue
-                    row = launch_link.find_element(By.XPATH, "./ancestor::tr")
+                    seen_hrefs.add(href)
+
+                    link_text = link.text.strip().lower()
+                    row = link.find_element(By.XPATH, "./ancestor::tr")
                     cells = row.find_elements(By.TAG_NAME, "td")
 
                     chapter_name = ""
@@ -288,12 +294,21 @@ class CKLScraper(BaseScraper):
                     for cell in cells:
                         cell_text = cell.text.strip()
                         if cell_text.startswith("Chapter") or ":" in cell_text:
-                            if len(cell_text) > 5 and cell_text != "Launch":
+                            if len(cell_text) > 5 and cell_text not in ("Launch", "Revisit"):
                                 chapter_name = cell_text
+                        # Status can be: To Do, In Progress, Complete, Completed,
+                        # or a score like "4/12", or "Revisiting"
                         if cell_text in ("To Do", "In Progress", "Complete", "Completed"):
                             status = cell_text
+                        elif re.match(r'^\d+/\d+$', cell_text):
+                            status = "Completed (%s)" % cell_text
+                        elif cell_text.lower().startswith("revisiting"):
+                            status = "Revisiting"
                     if not chapter_name:
-                        chapter_name = row.text.strip().replace("Launch", "").strip()
+                        chapter_name = row.text.strip()
+                        for remove in ("Launch", "Revisit", "Revisiting"):
+                            chapter_name = chapter_name.replace(remove, "")
+                        chapter_name = chapter_name.strip()
 
                     chapters.append(Chapter(
                         chapter_name=chapter_name, launch_url=href, status=status,
