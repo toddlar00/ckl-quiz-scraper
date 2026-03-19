@@ -112,12 +112,28 @@ class CKLScraper(BaseScraper):
     def _is_preamble_page(self):
         """Check if the current page is a preamble/instruction page (not a question)."""
         try:
-            # If there are radio buttons, it's a question page
+            # If there are radio buttons, it's a question page (MC/TF)
             radios = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
             if radios:
                 return False
 
             body_text = self.driver.find_element(By.TAG_NAME, "body").text
+
+            # If the page has a "Question X of Y" marker, it's a question page
+            # (Short Answer / Fill-in / Essay won't have radio buttons)
+            if re.search(r'Question\s+\d+\s+of\s+\d+', body_text):
+                return False
+
+            # If the page has a text input or textarea with a question type label,
+            # it's an open-ended question, not preamble
+            text_inputs = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "input[type='text']:not([name*='search']):not([name*='filter']), textarea"
+            )
+            if text_inputs and self._detect_type(body_text) in (
+                "Short Answer", "Fill in the Blank", "Essay"
+            ):
+                return False
 
             # Check for preamble indicators
             has_continue = bool(self._find_continue_button())
@@ -348,16 +364,35 @@ class CKLScraper(BaseScraper):
         if not choices:
             choices = self._extract_choices_from_text(body_text)
         if not choices:
-            logger.warning("  No answer choices found on page")
+            # Don't warn for question types that don't have choices
+            qtype = self._detect_type(body_text)
+            if qtype not in ("Short Answer", "Fill in the Blank", "Essay"):
+                logger.warning("  No answer choices found on page")
         return choices
 
     def submit_answer(self):
         try:
+            # MC / True-False: click a radio button
             radios = self.driver.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            clicked_radio = False
             for radio in radios:
                 if radio.is_displayed() and radio.is_enabled():
                     _safe_click(self.driver, radio, "radio button")
+                    clicked_radio = True
                     break
+
+            # Short Answer / Fill-in: type a placeholder into the text field
+            if not clicked_radio:
+                text_inputs = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "input[type='text']:not([name*='search']):not([name*='filter']), textarea"
+                )
+                for inp in text_inputs:
+                    if inp.is_displayed() and inp.is_enabled():
+                        inp.clear()
+                        inp.send_keys("N/A")
+                        break
+
             get_adaptive_delay().sleep("pre_submit")
             submit_btn = _find_button(self.driver, ["submit"])
             if submit_btn:
@@ -374,6 +409,7 @@ class CKLScraper(BaseScraper):
         correct_answer = ""
         explanation = ""
 
+        # MC feedback: "The correct answer is C."
         match = re.search(r'The correct answer is\s+([A-D])', body_text, re.IGNORECASE)
         if match:
             correct_answer = match.group(1).upper()
@@ -381,6 +417,7 @@ class CKLScraper(BaseScraper):
             if re.search(r'\bCorrect[!.]', body_text) and "incorrect" not in body_text.lower():
                 correct_answer = "A"
 
+        # "Here's Why:" explanation (works for both MC and SA)
         heres_why = re.search(
             r"Here'?s\s+Why:?\s*(.+?)(?=Check this box|You will be able|I'm still confused|Next Question|Back to Practice|$)",
             body_text, re.DOTALL | re.IGNORECASE,
@@ -388,6 +425,32 @@ class CKLScraper(BaseScraper):
         if heres_why:
             explanation = heres_why.group(1).strip()
             explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
+
+        # Short Answer / open-ended feedback: look for model answer patterns
+        if not correct_answer and not explanation:
+            # Pattern: "Model Answer:" or "Sample Answer:" or "Suggested Answer:"
+            sa_match = re.search(
+                r'(?:Model|Sample|Suggested|Correct|Best)\s+(?:Answer|Response):?\s*(.+?)(?=Check this box|You will be able|Next Question|Back to Practice|©\d{4}|$)',
+                body_text, re.DOTALL | re.IGNORECASE,
+            )
+            if sa_match:
+                explanation = sa_match.group(1).strip()
+                explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
+                correct_answer = "(see explanation)"
+
+            # If still nothing, grab any substantial text after "Submit" as feedback
+            if not explanation:
+                # For SA questions, CKL often just shows the explanation text
+                # after submit without a specific label
+                post_submit = re.search(
+                    r'(?:Your\s+Answer|Your\s+Response|Feedback):?\s*(.+?)(?=Check this box|Next Question|Back to Practice|©\d{4}|$)',
+                    body_text, re.DOTALL | re.IGNORECASE,
+                )
+                if post_submit:
+                    explanation = post_submit.group(1).strip()
+                    explanation = re.sub(r'\n\s*\n', '\n', explanation).strip()
+                    if explanation:
+                        correct_answer = "(see explanation)"
 
         if not correct_answer:
             logger.warning("  Could not determine correct answer from feedback")
@@ -505,35 +568,75 @@ class CKLScraper(BaseScraper):
     # CKL-specific helpers
     # ------------------------------------------------------------------
 
+    # Lines/phrases that indicate we've passed the question text and
+    # entered navigation, footer, or other page chrome.
+    _STOP_MARKERS = [
+        "Back to Practice Set",
+        "Next Question",
+        "All Rights Reserved",
+        "Check this box",
+        "I'm still confused",
+        "You will be able",
+        "Submit",
+    ]
+
+    # Type labels that appear on their own line before the question.
+    _TYPE_LABELS = {
+        "Multiple Choice", "True/False", "Fill in the Blank",
+        "Select All That Apply", "Short Answer", "Essay",
+    }
+
     @staticmethod
     def _detect_type(body_text):
         if "Multiple Choice" in body_text:
             return "Multiple Choice"
         if "True/False" in body_text or "True or False" in body_text:
             return "True/False"
+        if "Short Answer" in body_text:
+            return "Short Answer"
         if "Fill in" in body_text:
             return "Fill in the Blank"
         if "Select all" in body_text or "select all" in body_text:
             return "Select All That Apply"
+        if "Essay" in body_text:
+            return "Essay"
         return ""
 
-    @staticmethod
-    def _extract_text(body_text):
+    @classmethod
+    def _extract_text(cls, body_text):
         try:
             text = body_text
             marker = ">>>> Question <<<<"
             if marker in text:
                 text = text.split(marker, 1)[1].strip()
+
+            # Strip everything before "Question X of Y" line if present,
+            # so we start right at the question content.
+            q_of_match = re.search(r'Question\s+\d+\s+of\s+\d+', text)
+            if q_of_match:
+                text = text[q_of_match.end():].strip()
+
             lines = text.split("\n")
             question_lines = []
             for line in lines:
                 stripped = line.strip()
+                # Stop at answer choices (MC)
                 if re.match(r'^[○●]?\s*[A-D]\.\s', stripped):
                     break
+                # Stop at nav/footer markers
+                if any(m in stripped for m in cls._STOP_MARKERS):
+                    break
+                # Stop at copyright line
+                if re.match(r'^©\d{4}', stripped):
+                    break
+                # Skip empty leading lines
                 if not question_lines and not stripped:
                     continue
-                if stripped in ("Multiple Choice", "True/False",
-                                "Fill in the Blank", "Select All That Apply"):
+                # Skip type labels
+                if stripped in cls._TYPE_LABELS:
+                    continue
+                # Skip "Question X of Y" if it somehow appears inline
+                if re.match(r'^Question\s+\d+\s+of\s+\d+$', stripped):
                     continue
                 question_lines.append(stripped)
             result = " ".join(question_lines).strip()

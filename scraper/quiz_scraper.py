@@ -603,6 +603,22 @@ def _detect_question_type(body_text):
     return ""
 
 
+_STOP_MARKERS = [
+    "Back to Practice Set",
+    "Next Question",
+    "All Rights Reserved",
+    "Check this box",
+    "I'm still confused",
+    "You will be able",
+    "Submit",
+]
+
+_TYPE_LABELS = {
+    "Multiple Choice", "True/False", "Fill in the Blank",
+    "Select All That Apply", "Short Answer", "Essay",
+}
+
+
 def _extract_question_text(body_text):
     """Extract the question text between the header and answer choices from cached text."""
     try:
@@ -612,6 +628,11 @@ def _extract_question_text(body_text):
         if marker in text:
             text = text.split(marker, 1)[1].strip()
 
+        # Strip everything before "Question X of Y" if present
+        q_of_match = re.search(r'Question\s+\d+\s+of\s+\d+', text)
+        if q_of_match:
+            text = text[q_of_match.end():].strip()
+
         lines = text.split("\n")
         question_lines = []
         for line in lines:
@@ -619,11 +640,19 @@ def _extract_question_text(body_text):
             # Stop when we hit an answer choice
             if re.match(r'^[○●]?\s*[A-D]\.\s', stripped):
                 break
+            # Stop at nav/footer markers
+            if any(m in stripped for m in _STOP_MARKERS):
+                break
+            # Stop at copyright line
+            if re.match(r'^©\d{4}', stripped):
+                break
             if not question_lines and not stripped:
                 continue
             # Skip type labels
-            if stripped in ("Multiple Choice", "True/False", "Fill in the Blank",
-                            "Select All That Apply"):
+            if stripped in _TYPE_LABELS:
+                continue
+            # Skip "Question X of Y" if inline
+            if re.match(r'^Question\s+\d+\s+of\s+\d+$', stripped):
                 continue
             question_lines.append(stripped)
 
