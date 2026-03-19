@@ -67,30 +67,149 @@ SCREENSHOT_DIR = "debug_screenshots"
 def validate_browser_installation():
     """Check that Chrome or Chromium is installed and accessible.
 
+    Searches PATH, common install directories on Linux/macOS/Windows,
+    Snap, Flatpak, Nix, Homebrew, and user-local locations. Logs every
+    location checked so users can diagnose discovery failures with -v.
+
     Returns:
         Path to the Chrome binary, or None if not found.
     """
-    # Check common binary names
-    for binary in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]:
+    import glob as _glob
+    import platform
+
+    # --- Step 1: Check PATH via shutil.which ---
+    path_binaries = [
+        "google-chrome", "google-chrome-stable", "google-chrome-beta",
+        "google-chrome-unstable", "chromium", "chromium-browser", "chrome",
+    ]
+    for binary in path_binaries:
         path = shutil.which(binary)
         if path:
-            logger.debug("Found browser: %s at %s", binary, path)
+            logger.debug("Found browser on PATH: %s -> %s", binary, path)
             return path
+    logger.debug("No Chrome/Chromium found on PATH")
 
-    # Check common installation paths
-    common_paths = [
+    # --- Step 2: Check well-known filesystem locations ---
+    home = os.path.expanduser("~")
+    system = platform.system()  # Linux, Darwin, Windows
+
+    # Build a list of candidate paths per platform
+    candidates = []
+
+    # Linux standard packages (apt, yum, dnf, pacman, zypper)
+    candidates += [
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome-beta",
+        "/usr/bin/google-chrome-unstable",
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
-        "/snap/bin/chromium",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/lib/chromium/chromium",
+        "/usr/lib/chromium-browser/chromium-browser",
+        "/usr/lib64/chromium-browser/chromium-browser",
     ]
-    for path in common_paths:
-        if os.path.isfile(path):
-            logger.debug("Found browser at %s", path)
-            return path
 
+    # Snap (Ubuntu default for Chromium since 19.10)
+    candidates += [
+        "/snap/bin/chromium",
+        "/snap/chromium/current/usr/lib/chromium-browser/chrome",
+    ]
+
+    # Flatpak
+    candidates += [
+        "/var/lib/flatpak/exports/bin/com.google.Chrome",
+        "/var/lib/flatpak/exports/bin/org.chromium.Chromium",
+        f"{home}/.local/share/flatpak/exports/bin/com.google.Chrome",
+        f"{home}/.local/share/flatpak/exports/bin/org.chromium.Chromium",
+    ]
+
+    # Nix / NixOS
+    candidates += [
+        f"{home}/.nix-profile/bin/google-chrome-stable",
+        f"{home}/.nix-profile/bin/chromium",
+        "/run/current-system/sw/bin/google-chrome-stable",
+        "/run/current-system/sw/bin/chromium",
+    ]
+
+    # macOS (native + Homebrew cask)
+    candidates += [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        f"{home}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        f"{home}/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/opt/homebrew/bin/chromium",
+        "/usr/local/bin/chromium",
+    ]
+
+    # Windows (native + WSL mount points)
+    candidates += [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.join(os.getenv("LOCALAPPDATA", ""), r"Google\Chrome\Application\chrome.exe"),
+        os.path.join(os.getenv("PROGRAMFILES", ""), r"Google\Chrome\Application\chrome.exe"),
+        # WSL: Windows Chrome accessible from Linux
+        "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+        "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+    ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            logger.debug("Found browser at known path: %s", candidate)
+            return candidate
+
+    # --- Step 3: Glob search for Chrome in opt/local directories ---
+    glob_patterns = [
+        "/opt/google/chrome*/google-chrome*",
+        "/opt/google/chrome*/chrome",
+        "/opt/chromium*/chrome",
+        f"{home}/.local/bin/google-chrome*",
+        f"{home}/.local/bin/chromium*",
+    ]
+    for pattern in glob_patterns:
+        matches = sorted(_glob.glob(pattern))
+        for match in matches:
+            if os.path.isfile(match) and os.access(match, os.X_OK):
+                logger.debug("Found browser via glob: %s", match)
+                return match
+
+    # --- Step 4: Try platform-specific discovery commands ---
+    if system == "Linux":
+        # Ask the package manager where Chrome lives
+        for cmd in [
+            "dpkg -L google-chrome-stable 2>/dev/null | grep -m1 '/chrome$'",
+            "rpm -ql google-chrome-stable 2>/dev/null | grep -m1 '/google-chrome'",
+        ]:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True, timeout=5,
+                )
+                path = result.stdout.strip()
+                if path and os.path.isfile(path):
+                    logger.debug("Found browser via package query: %s", path)
+                    return path
+            except Exception:
+                continue
+
+    elif system == "Darwin":
+        # macOS: use mdfind (Spotlight) to locate Chrome.app
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["mdfind", "kMDItemCFBundleIdentifier == 'com.google.Chrome'"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for app_path in result.stdout.strip().splitlines():
+                chrome_bin = os.path.join(app_path, "Contents", "MacOS", "Google Chrome")
+                if os.path.isfile(chrome_bin):
+                    logger.debug("Found browser via Spotlight: %s", chrome_bin)
+                    return chrome_bin
+        except Exception:
+            pass
+
+    logger.debug("Chrome/Chromium not found after exhaustive search")
     return None
 
 
@@ -105,12 +224,24 @@ def create_driver():
     chrome_path = validate_browser_installation()
     if not chrome_path:
         raise RuntimeError(
-            "Chrome or Chromium is not installed or not in PATH.\n"
-            "Install one of the following:\n"
+            "Chrome or Chromium could not be found.\n"
+            "\n"
+            "Troubleshooting (run with -v for detailed search log):\n"
+            "  1. Verify it's installed:\n"
+            "       which google-chrome || which chromium\n"
+            "       google-chrome --version\n"
+            "  2. If installed in a non-standard location, add it to PATH:\n"
+            "       export PATH=\"/path/to/chrome/dir:$PATH\"\n"
+            "  3. On Snap/Flatpak, ensure the binary is exported:\n"
+            "       snap list chromium\n"
+            "       flatpak list | grep -i chrom\n"
+            "\n"
+            "To install:\n"
             "  Ubuntu/Debian: sudo apt install google-chrome-stable\n"
-            "  Or Chromium:   sudo apt install chromium-browser\n"
+            "  Fedora/RHEL:   sudo dnf install google-chrome-stable\n"
+            "  Arch:          sudo pacman -S chromium\n"
             "  macOS:         brew install --cask google-chrome\n"
-            "  Or download from: https://www.google.com/chrome/"
+            "  Or download:   https://www.google.com/chrome/"
         )
     logger.info("Using browser: %s", chrome_path)
 
